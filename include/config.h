@@ -123,7 +123,7 @@ extern String DEVICE_ID;
 // OTA CONFIGURATION
 #define OTA_FIRMWARE_URL                                                       \
   "https://github.com/DioneProtocol/orion-firmware/raw/refs/heads/main/"       \
-  "finalOrion_transmiter.ino.bin"
+  "firmware.bin"
 
 #define FIRMWARE_VERSION "1.0.0"
 
