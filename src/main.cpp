@@ -255,7 +255,6 @@ void handleTriggers() {
   if (action == "reset") {
     Utils::logMessage("MAIN", "Trigger: Reset WiFi credentials");
     WifiManager::resetCredentials();
-    // Won't return - device restarts
   } else if (action == "config") {
     Utils::logMessage("MAIN", "Trigger: Enter WiFi config mode");
     WifiManager::startPortal();
