@@ -124,6 +124,7 @@ bool checkForUpdate(OtaUpdateInfo *info) {
   client.setTimeout(HTTP_TIMEOUT_MS / 1000);
 
   HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
 
@@ -420,6 +421,7 @@ static bool _downloadAndInstall() {
   client.setTimeout(HTTP_TIMEOUT_MS / 1000);
 
   HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
 
