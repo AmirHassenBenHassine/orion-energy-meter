@@ -1,7 +1,6 @@
 #include <Arduino.h>
 
 #include "battery_manager.h"
-#include "ble_manager.h"
 #include "button_manager.h"
 #include "certificates.h"
 #include "config.h"
@@ -67,9 +66,6 @@ void setup() {
 
   // Initialize energy sensors
   EnergySensor::begin();
-
-  // Initialize BLE
-  // BleManager::begin();
 
   // Initialize WiFi
   bool forcePortal = (bootMode == ButtonManager::BOOT_WIFI_PAIR);
@@ -238,6 +234,7 @@ void handleBootMode(ButtonManager::BootMode mode) {
 
   case ButtonManager::BOOT_WIFI_PAIR:
     Utils::logMessage("MAIN", "Entering WiFi pairing mode...");
+    WifiManager::startPortal();
     break;
 
   case ButtonManager::BOOT_NORMAL:
@@ -283,14 +280,6 @@ void sendData() {
     sent = MqttManager::publishMetrics(currentMetrics);
     if (sent) {
       Utils::logMessage("MAIN", "Data sent via MQTT");
-    }
-  }
-
-  // if not connected to mqtt
-  if (!sent && BleManager::isClientConnected()) {
-    sent = BleManager::sendMetrics(currentMetrics);
-    if (sent) {
-      Utils::logMessage("MAIN", "Data sent via BLE");
     }
   }
 

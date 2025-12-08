@@ -56,7 +56,7 @@ extern String DEVICE_ID;
 #define WIFI_LWIP_STABILIZATION_MS 2000
 
 // MQTT CONFIGURATION
-#define MQTT_BROKER_HOST "orion.local"
+#define MQTT_BROKER_HOST "10.240.151.203"
 // xxxxxxxxxxxxxx IN FUTURE TO BE UPDATE TO SECURE PORT ONCE VPS BROKER IS SETUP
 // xxxxxxxxxxxxxx
 #define MQTT_BROKER_PORT 1883
@@ -151,7 +151,7 @@ extern String DEVICE_ID;
 #define TASK_NAME_LED_BATTERY "BatteryLED"
 
 // MDNS CONFIGURATION
-#define MDNS_HOSTNAME "orion"
+#define MDNS_HOSTNAME "archlinux"
 
 // CONNECTIVITY TEST
 #define CONNECTIVITY_TEST_HOST "google.com"
