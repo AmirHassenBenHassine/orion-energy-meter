@@ -2,17 +2,19 @@
 #include "config.h"
 #include "led_manager.h"
 #include "utils.h"
+#include "wifi_manager.h"  // ✅ Add this
 
 #include <Preferences.h>
+#include <nvs_flash.h>  // ✅ Add this for nvs_flash_erase()
 
 namespace ButtonManager {
 
 // Button timing constants (milliseconds)
 static const uint32_t DEBOUNCE_DELAY_MS = 50;
 static const uint32_t SHORT_PRESS_MAX_MS = 1000;
-static const uint32_t LONG_PRESS_MIN_MS = 1000;
-static const uint32_t LONG_PRESS_MAX_MS = 3000;
-static const uint32_t VERY_LONG_PRESS_MIN_MS = 3000;
+static const uint32_t LONG_PRESS_MIN_MS = 3000;
+static const uint32_t LONG_PRESS_MAX_MS = 5000;
+static const uint32_t VERY_LONG_PRESS_MIN_MS = 5000;
 static const uint32_t DOUBLE_CLICK_WINDOW_MS = 500;
 static const uint32_t STARTUP_HOLD_TIME_MS = 3000;
 
@@ -27,12 +29,16 @@ static ButtonState _buttonStates[BTN_COUNT];
 static bool _lastRawState[BTN_COUNT] = {false, false};
 static uint32_t _lastDebounceTime[BTN_COUNT] = {0, 0};
 
+// ✅ Track if action already triggered
+static bool _actionTriggered[BTN_COUNT] = {false, false};
+
 // Current boot mode
 static BootMode _currentBootMode = BOOT_NORMAL;
 
 // Callbacks
 static ButtonEventCallback _eventCallback = nullptr;
 static BootModeCallback _bootModeCallback = nullptr;
+static ImmediateActionCallback _immediateActionCallback = nullptr; // ✅ NEW
 
 // Initialized flag
 static volatile bool _initialized = false;
@@ -46,6 +52,7 @@ static void _processButton(ButtonId button);
 static void _triggerEvent(ButtonId button, ButtonEvent event);
 static bool _readButtonDebounced(ButtonId button);
 static void _resetButtonState(ButtonId button);
+static void _checkImmediateActions(ButtonId button); // ✅ NEW
 
 bool begin() {
   if (_initialized) {
@@ -65,7 +72,7 @@ bool begin() {
   _taskRunning = true;
   BaseType_t result = xTaskCreatePinnedToCore(
       _buttonTask, "ButtonTask", TASK_STACK_SIZE_SMALL, nullptr,
-      TASK_PRIORITY_MEDIUM, &_buttonTaskHandle, TASK_CORE_1);
+      TASK_PRIORITY_HIGH, &_buttonTaskHandle, TASK_CORE_1);
 
   if (result != pdPASS) {
     Utils::logMessage("BUTTON", "Failed to create button task");
@@ -103,6 +110,46 @@ void update() {
   for (int i = 0; i < BTN_COUNT; i++) {
     _processButton((ButtonId)i);
   }
+}
+
+// ✅ NEW: Check buttons and return event if threshold reached
+ButtonEvent checkButtons() {
+  if (!_initialized) {
+    return BTN_EVENT_NONE;
+  }
+
+  // Check each button
+  for (int i = 0; i < BTN_COUNT; i++) {
+    ButtonId button = (ButtonId)i;
+    ButtonState *state = &_buttonStates[button];
+    
+    // If button is pressed, check duration
+    if (state->isPressed && !_actionTriggered[button]) {
+      uint32_t duration = millis() - state->pressedTime;
+      
+      // ✅ WiFi Pairing Button - LONG PRESS (3 seconds)
+      if (button == BTN_WIFI_PAIRING && duration >= LONG_PRESS_MIN_MS) {
+        _actionTriggered[button] = true;
+        Utils::logMessage("BUTTON", "⚡ WiFi Pairing - LONG PRESS detected!");
+        LedManager::runSuccessSequence();
+        return BTN_EVENT_LONG_PRESS;
+      }
+      
+      // ✅ Hard Reset Button - VERY LONG PRESS (5 seconds)
+      if (button == BTN_HARD_RESET && duration >= VERY_LONG_PRESS_MIN_MS) {
+        _actionTriggered[button] = true;
+        Utils::logMessage("BUTTON", "⚡ Hard Reset - VERY LONG PRESS detected!");
+        LedManager::runErrorSequence();
+        return BTN_EVENT_VERY_LONG_PRESS;
+      }
+    }
+  }
+  
+  return BTN_EVENT_NONE;
+}
+
+void setImmediateActionCallback(ImmediateActionCallback callback) {
+  _immediateActionCallback = callback;
 }
 
 BootMode detectBootMode() {
@@ -237,7 +284,7 @@ const char *getWakeupCauseString() {
 void performHardReset() {
   Utils::logMessage("BUTTON", "   PERFORMING HARD RESET");
 
-  // Visual indication - rapid blink all LEDs
+   // Visual indication - rapid blink all LEDs
   for (int cycle = 0; cycle < 10; cycle++) {
     LedManager::setState(LedManager::LED_WIFI, true);
     LedManager::setState(LedManager::LED_CHARGING, true);
@@ -249,20 +296,43 @@ void performHardReset() {
     delay(100);
   }
 
+   // ✅ CRITICAL: Erase WiFi credentials from ESP32 NVS
+  Utils::logMessage("BUTTON", "Erasing WiFi credentials from flash...");
+  WiFi.disconnect(true, true);  // disconnect(wifioff, eraseap)
+  delay(100);
+  
+  // ✅ Also use WifiManager to clear
+  Utils::logMessage("BUTTON", "Clearing WiFi via WifiManager...");
+  WifiManager::resetCredentials();
+  delay(100);
+
   // Clear all preferences namespaces
-  const char *namespaces[] = {PREF_NAMESPACE_WIFI, PREF_NAMESPACE_OTA,
-                              PREF_NAMESPACE_DEVICE, ""};
+  const char *namespaces[] = {
+    PREF_NAMESPACE_WIFI,
+    PREF_NAMESPACE_MQTT, 
+    PREF_NAMESPACE_OTA,
+    PREF_NAMESPACE_DEVICE,
+    "wifi",
+    "nvs.net80211",  // ✅ ESP32 WiFi storage
+    "nvs"
+  };
 
   Preferences prefs;
   for (const char *ns : namespaces) {
-    if (prefs.begin(ns, false)) {
-      prefs.clear();
-      prefs.end();
-      Utils::logMessageF("BUTTON", "Cleared namespace: %s",
-                         strlen(ns) > 0 ? ns : "(default)");
+    if (strlen(ns) > 0 && strcmp(ns, "nvs.net80211") != 0) {
+      if (prefs.begin(ns, false)) {
+        prefs.clear();
+        prefs.end();
+        Utils::logMessageF("BUTTON", "Cleared namespace: %s", ns);
+      }
     }
   }
 
+  // ✅ Force erase entire NVS partition (nuclear option)
+  Utils::logMessage("BUTTON", "Erasing NVS partition...");
+  nvs_flash_erase();  // Erase entire NVS
+  nvs_flash_init();   // Reinitialize
+  
   // Final confirmation blink
   for (int i = 0; i < 3; i++) {
     LedManager::setState(LedManager::LED_POWER, false);
@@ -272,7 +342,7 @@ void performHardReset() {
   }
 
   Utils::logMessage("BUTTON", "All data erased. Restarting...");
-  delay(500);
+  delay(1000);
 
   ESP.restart();
 }
@@ -365,6 +435,7 @@ const char *eventToString(ButtonEvent event) {
 static void _buttonTask(void *parameter) {
   while (_taskRunning) {
     update();
+    yield();  // ✅ Feed watchdog
     Utils::delayTask(20);
   }
 
@@ -381,7 +452,7 @@ static void _processButton(ButtonId button) {
     state->isPressed = true;
     state->pressedTime = now;
     state->pressDuration = 0;
-
+    _actionTriggered[button] = false;  // ✅ Reset action flag
     _triggerEvent(button, BTN_EVENT_PRESSED);
   }
   // Button just released
@@ -389,14 +460,11 @@ static void _processButton(ButtonId button) {
     state->isPressed = false;
     state->releasedTime = now;
     state->pressDuration = now - state->pressedTime;
-
     _triggerEvent(button, BTN_EVENT_RELEASED);
 
     // Determine press type
     if (state->pressDuration < SHORT_PRESS_MAX_MS) {
       _triggerEvent(button, BTN_EVENT_SHORT_PRESS);
-
-      // Check for double-click
       if (now - state->releasedTime < DOUBLE_CLICK_WINDOW_MS) {
         state->pressCount++;
       } else {
@@ -409,10 +477,32 @@ static void _processButton(ButtonId button) {
       _triggerEvent(button, BTN_EVENT_VERY_LONG_PRESS);
       state->pressCount = 0;
     }
+    
+    _actionTriggered[button] = false;  // ✅ Reset here when released
   }
   // Button being held
   else if (currentState && state->isPressed) {
     state->pressDuration = now - state->pressedTime;
+    _checkImmediateActions(button);  // ✅ Check thresholds while held
+  }
+}
+
+// ✅ NEW: Check for immediate action thresholds
+static void _checkImmediateActions(ButtonId button) {
+  ButtonState *state = &_buttonStates[button];
+  uint32_t duration = state->pressDuration;
+  
+  // Only trigger once per press
+  if (_actionTriggered[button]) {
+    return;
+  }
+  
+  // Call immediate action callback if registered
+  if (_immediateActionCallback != nullptr) {
+    bool consumed = _immediateActionCallback(button, duration);
+    if (consumed) {
+      _actionTriggered[button] = true;
+    }
   }
 }
 

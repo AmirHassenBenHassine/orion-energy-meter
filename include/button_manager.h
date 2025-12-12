@@ -46,6 +46,12 @@ struct ButtonState {
 typedef void (*ButtonEventCallback)(ButtonId button, ButtonEvent event);
 
 /**
+ * Immediate action callback - called DURING button press
+ * Returns true to consume the event (prevent further processing)
+ */
+typedef bool (*ImmediateActionCallback)(ButtonId button, uint32_t pressDuration);
+
+/**
  *   Boot mode callback type
  */
 typedef void (*BootModeCallback)(BootMode mode);
@@ -137,6 +143,20 @@ void setEventCallback(ButtonEventCallback callback);
  * @param callback Function to call when boot mode is detected
  */
 void setBootModeCallback(BootModeCallback callback);
+
+/**
+ * Set immediate action callback for real-time response
+ * This callback is called repeatedly while button is held
+ * @param callback Function to call with button and duration
+ */
+void setImmediateActionCallback(ImmediateActionCallback callback);
+
+/**
+ * Check buttons and return any immediate event
+ * Call this frequently in main loop for responsive buttons
+ * @return Button event if any occurred
+ */
+ButtonEvent checkButtons();
 
 /**
  *   Check for long press during startup

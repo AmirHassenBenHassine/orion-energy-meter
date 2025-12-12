@@ -35,14 +35,26 @@ bool begin() {
   if (_tasksRunning) {
     return true;
   }
-
+  
   // Initialize LED pins
   for (int i = 0; i < LED_COUNT; i++) {
     pinMode(_ledPins[i], OUTPUT);
     digitalWrite(_ledPins[i], LOW);
   }
+  
+  // ✅ Run startup sequence BEFORE starting tasks
+  runStartupSequence();
+  
+  // ✅ Set initial hardware state based on mode
+  for (int i = 0; i < LED_COUNT; i++) {
+    if (_ledModes[i] == LED_ON) {
+      digitalWrite(_ledPins[i], HIGH);
+    } else {
+      digitalWrite(_ledPins[i], LOW);
+    }
+  }
 
-  _tasksRunning = true;
+  _tasksRunning = true;  // ✅ Tasks start AFTER startup sequence
 
   // Create LED tasks on Core 1
   BaseType_t result;
@@ -204,23 +216,31 @@ static void _handleBlink(uint8_t pin, LedMode mode, bool &state) {
 
   state = !state;
   digitalWrite(pin, state ? HIGH : LOW);
-  Utils::delayTask(interval);
+  yield();  // ✅ Feed watchdog before delay
+  vTaskDelay(pdMS_TO_TICKS(interval));
+  yield();  // ✅ Feed watchdog after delay}
 }
 
 static void _powerLedTask(void *parameter) {
-  digitalWrite(_ledPins[LED_POWER], HIGH); // Always on
-
+  // Ensure it's HIGH from the start
+  digitalWrite(_ledPins[LED_POWER], HIGH);
+  
   while (_tasksRunning) {
-    Utils::delayTask(1000);
+    // ✅ Continuously enforce HIGH state
+    digitalWrite(_ledPins[LED_POWER], HIGH);
+    yield();  // Feed watchdog
+    vTaskDelay(pdMS_TO_TICKS(500));  // Check twice per second
   }
-
+  
+  digitalWrite(_ledPins[LED_POWER], LOW);
   vTaskDelete(nullptr);
 }
 
 static void _wifiLedTask(void *parameter) {
   bool state = false;
-
+  yield();  // ✅ Feed watchdog at start of loop
   while (_tasksRunning) {
+
     LedMode mode = _ledModes[LED_WIFI];
 
     switch (mode) {
@@ -240,22 +260,35 @@ static void _wifiLedTask(void *parameter) {
       _handleBlink(_ledPins[LED_WIFI], mode, state);
       break;
     }
+    yield();  // ✅ Feed watchdog at end of loop
   }
-
   vTaskDelete(nullptr);
 }
 
 static void _chargingLedTask(void *parameter) {
+  bool lastState = false;
+  
   while (_tasksRunning) {
+    // ✅ Read charging status directly
+    bool isCharging = digitalRead(CHARGING_STATUS_PIN) == HIGH;  // Active HIGH
+    
     LedMode mode = _ledModes[LED_CHARGING];
-
-    if (mode == LED_ON) {
+    
+    // ✅ Override mode based on actual hardware state
+    if (isCharging) {
       digitalWrite(_ledPins[LED_CHARGING], HIGH);
     } else {
       digitalWrite(_ledPins[LED_CHARGING], LOW);
     }
-
-    Utils::delayTask(500);
+    
+    // ✅ Detect state change
+    if (isCharging != lastState) {
+      Serial.printf("[LED] Charging status changed: %s\n", isCharging ? "ON" : "OFF");
+      lastState = isCharging;
+    }
+    
+    yield();
+    vTaskDelay(pdMS_TO_TICKS(100));  // ✅ Check every 100ms instead of 500ms
   }
 
   vTaskDelete(nullptr);
@@ -263,6 +296,7 @@ static void _chargingLedTask(void *parameter) {
 
 static void _batteryLedTask(void *parameter) {
   bool state = false;
+  yield();  // ✅ Feed watchdog
 
   while (_tasksRunning) {
     LedMode mode = _ledModes[LED_BATTERY];
@@ -287,6 +321,8 @@ static void _batteryLedTask(void *parameter) {
       Utils::delayTask(100);
       break;
     }
+    yield();  // ✅ Feed watchdog
+
   }
 
   vTaskDelete(nullptr);

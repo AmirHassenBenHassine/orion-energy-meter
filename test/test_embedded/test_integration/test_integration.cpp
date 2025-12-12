@@ -6,10 +6,10 @@
 #include <time.h>
 #include <unity.h>
 
-#define TEST_WIFI_SSID "A72"
-#define TEST_WIFI_PASS "nono1992"
-#define TEST_MQTT_HOST "10.46.218.203"
-#define TEST_MQTT_PORT 8883
+#define TEST_WIFI_SSID "TUNISIETELECOM-2.4G-nG46_Plus"
+#define TEST_WIFI_PASS "KF39UwaM"
+#define TEST_MQTT_HOST "192.168.100.235"
+#define TEST_MQTT_PORT 1883
 #define TEST_MQTT_USER "orion_device"
 #define TEST_MQTT_PASS "123456789"
 
@@ -73,10 +73,10 @@ void test_complete_data_flow(void) {
   TEST_ASSERT_EQUAL_MESSAGE(WL_CONNECTED, WiFi.status(), "WiFi failed");
   Serial.println("WiFi: OK");
 
-  configTime(0, 0, "pool.ntp.org");
-  time_t now = time(nullptr);
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
+  time_t now = time(nullptr); 
   start = millis();
-  while (now < 1700000000 && (millis() - start) < 10000) {
+  while (now < 1700000000 && (millis() - start) < 20000) { 
     delay(500);
     now = time(nullptr);
   }
@@ -120,7 +120,7 @@ void test_complete_data_flow(void) {
            "2025-11-29 15:00:00", voltage, totalPower, current[0], power[0],
            current[1], power[1], current[2], power[2]);
 
-  bool published = mqtt.publish("orion/meter", payload);
+  bool published = mqtt.publish("energy/metrics", payload);
   TEST_ASSERT_TRUE_MESSAGE(published, "Publish failed");
   Serial.println("Publish: OK");
 

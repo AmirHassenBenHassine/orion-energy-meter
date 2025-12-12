@@ -330,6 +330,13 @@ static void _setupWiFiManager(::WiFiManager &wm) {
   wm.setCleanConnect(true);
   wm.setBreakAfterConfig(true);
   wm.setRemoveDuplicateAPs(true);
+  wm.setConfigPortalBlocking(false);  // ✅ CRITICAL
+
+  // ✅ Add callback to feed watchdog
+  wm.setPreSaveConfigCallback([]() {
+    yield();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  });
 
   // Portal callbacks
   wm.setAPCallback([](::WiFiManager *wm) {
@@ -408,40 +415,37 @@ static void _wifiTask(void *parameter) {
 
   // Generate portal name
   String deviceId = Utils::generateDeviceId();
-  String portalName =
-      String(WIFI_CONFIG_PORTAL_SSID) + "-" + deviceId.substring(8);
+  String portalName = WIFI_CONFIG_PORTAL_SSID;
 
   _notifyStateChange(WIFI_STATE_CONNECTING);
 
-  // Initial connection or portal
-  bool connected = false;
+  // Track portal state
+  bool portalMode = false;
+  bool initialConnectionDone = false;
 
   if (_forcePortalOnStart) {
     Utils::logMessage("WIFI", "Forced portal mode");
     _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-    connected =
-        wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
+    portalMode = true;
+    wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
   } else {
     Utils::logMessage("WIFI", "Attempting auto-connect...");
-    connected =
-        wm->autoConnect(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
+    // Try auto-connect but don't block
+    bool connected = wm->autoConnect(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
+    
+    if (connected) {
+      Utils::logMessage("WIFI", "Auto-connect successful");
+      _lastConnectedMillis = Utils::millis64();
+      _handleSuccessfulConnection();
+      delete wm;
+      wm = nullptr;
+      initialConnectionDone = true;
+    } else {
+      Utils::logMessage("WIFI", "Auto-connect failed, entering portal mode");
+      portalMode = true;
+      wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
+    }
   }
-
-  if (!connected) {
-    Utils::logMessage("WIFI", "Connection failed, restarting...");
-    delete wm;
-    _notifyStateChange(WIFI_STATE_ERROR);
-    Utils::delayTask(1000);
-    ESP.restart();
-    return;
-  }
-
-  // Connected successfully remove wm for saving space
-  delete wm;
-  wm = nullptr;
-
-  _lastConnectedMillis = Utils::millis64();
-  _handleSuccessfulConnection();
 
   // Enable event handling
   _eventsEnabled = true;
@@ -449,7 +453,31 @@ static void _wifiTask(void *parameter) {
 
   // Main task loop
   while (_taskShouldRun) {
-    if (xTaskNotifyWait(0, ULONG_MAX, &notification, pdMS_TO_TICKS(30000))) {
+    // ✅ CRITICAL: Feed watchdog every loop iteration
+    yield();
+    vTaskDelay(pdMS_TO_TICKS(10));
+    
+    // ✅ Process WiFiManager if portal is active
+    if (portalMode && wm != nullptr) {
+      wm->process();  // Non-blocking process
+      yield();  // Feed watchdog after processing
+      
+      // Check if connected via portal
+      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
+        Utils::logMessage("WIFI", "Connected via portal");
+        portalMode = false;
+        _lastConnectedMillis = Utils::millis64();
+        _handleSuccessfulConnection();
+        delete wm;
+        wm = nullptr;
+        initialConnectionDone = true;
+      }
+    }
+
+    // Check for notifications with short timeout
+    if (xTaskNotifyWait(0, ULONG_MAX, &notification, pdMS_TO_TICKS(100))) {
+      
+      yield();  // Feed watchdog after notification
 
       switch (notification) {
       case NOTIFY_SHUTDOWN:
@@ -461,8 +489,11 @@ static void _wifiTask(void *parameter) {
         break;
 
       case NOTIFY_GOT_IP:
-        _lastConnectedMillis = Utils::millis64();
-        _handleSuccessfulConnection();
+        if (!initialConnectionDone) {
+          _lastConnectedMillis = Utils::millis64();
+          _handleSuccessfulConnection();
+          initialConnectionDone = true;
+        }
         break;
 
       case NOTIFY_DISCONNECTED:
@@ -470,29 +501,27 @@ static void _wifiTask(void *parameter) {
         _lastConnectedMillis = 0;
         _notifyStateChange(WIFI_STATE_DISCONNECTED);
 
-        // Wait for auto-reconnect
-        Utils::delayTask(WIFI_RECONNECT_DELAY_MS);
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));
+        yield();
 
         if (!isFullyConnected()) {
           _reconnectAttempts++;
           _lastReconnectAttempt = Utils::millis64();
 
           if (_reconnectAttempts >= WIFI_MAX_RECONNECT_ATTEMPTS) {
-            Utils::logMessage("WIFI",
-                              "Max reconnect attempts, starting portal");
+            Utils::logMessage("WIFI", "Max reconnect attempts, starting portal");
 
-            ::WiFiManager *portalWm = new ::WiFiManager();
-            if (portalWm) {
-              _setupWiFiManager(*portalWm);
-              _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-
-              if (!portalWm->startConfigPortal(portalName.c_str(),
-                                               WIFI_CONFIG_PORTAL_PASSWORD)) {
-                Utils::logMessage("WIFI", "Portal failed, restarting");
-                delete portalWm;
-                ESP.restart();
+            if (wm == nullptr) {
+              wm = new ::WiFiManager();
+              if (wm) {
+                _setupWiFiManager(*wm);
               }
-              delete portalWm;
+            }
+            
+            if (wm) {
+              _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
+              portalMode = true;
+              wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
             }
           }
         }
@@ -501,37 +530,42 @@ static void _wifiTask(void *parameter) {
       case NOTIFY_FORCE_RECONNECT:
         Utils::logMessage("WIFI", "Forced reconnect");
         WiFi.disconnect(false);
-        Utils::delayTask(1000);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        yield();
         WiFi.reconnect();
         _reconnectAttempts++;
         _lastReconnectAttempt = Utils::millis64();
         break;
 
-      case NOTIFY_START_PORTAL: {
+      case NOTIFY_START_PORTAL:
         Utils::logMessage("WIFI", "Manual portal request");
-        ::WiFiManager *manualWm = new ::WiFiManager();
-        if (manualWm) {
-          _setupWiFiManager(*manualWm);
+        if (wm == nullptr) {
+          wm = new ::WiFiManager();
+          if (wm) {
+            _setupWiFiManager(*wm);
+          }
+        }
+        if (wm) {
           _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-          manualWm->startConfigPortal(portalName.c_str(),
-                                      WIFI_CONFIG_PORTAL_PASSWORD);
-          delete manualWm;
+          portalMode = true;
+          wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
         }
-      } break;
+        break;
       }
-    } else {
-      // Periodic health check
-      if (_taskShouldRun && isFullyConnected()) {
-        // Reset counter on stable connection
-        if (_reconnectAttempts > 0 &&
-            (Utils::millis64() - _lastReconnectAttempt) >
-                WIFI_STABLE_CONNECTION_MS) {
-          _reconnectAttempts = 0;
-        }
+    }
+
+    // Periodic health check
+    if (_taskShouldRun && isFullyConnected()) {
+      if (_reconnectAttempts > 0 &&
+          (Utils::millis64() - _lastReconnectAttempt) > WIFI_STABLE_CONNECTION_MS) {
+        _reconnectAttempts = 0;
       }
     }
   }
 
+  if (wm != nullptr) {
+    delete wm;
+  }
   _cleanup();
   _wifiTaskHandle = nullptr;
   vTaskDelete(nullptr);

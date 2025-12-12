@@ -34,7 +34,7 @@ extern String DEVICE_ID;
 #define BATTERY_VOLTAGE_PIN 36
 
 // TIMING CONSTANTS
-#define DATA_SEND_INTERVAL_MS 30000     // 30 seconds
+#define DATA_SEND_INTERVAL_MS 30000*20     // 30 seconds
 #define TRIGGER_CHECK_INTERVAL_MS 60000 // 1 minute
 #define WAKEUP_TIME_US 60000            // 1 minute
 #define OTA_CHECK_INTERVAL_MS 86400000  // 24 hours
@@ -56,7 +56,7 @@ extern String DEVICE_ID;
 #define WIFI_LWIP_STABILIZATION_MS 2000
 
 // MQTT CONFIGURATION
-#define MQTT_BROKER_HOST "10.240.151.203"
+#define MQTT_BROKER_HOST "orion.local"
 // xxxxxxxxxxxxxx IN FUTURE TO BE UPDATE TO SECURE PORT ONCE VPS BROKER IS SETUP
 // xxxxxxxxxxxxxx
 #define MQTT_BROKER_PORT 1883
@@ -71,8 +71,8 @@ extern String DEVICE_ID;
 // Authentication
 // // xxxxxxxxxxxxxx IN FUTURE TO BE UPDATE TO SECURE CONNECTION ONCE VPS BROKER
 // IS SETUP xxxxxxxxxxxxxx
-#define MQTT_DEFAULT_USERNAME ""
-#define MQTT_DEFAULT_PASSWORD ""
+#define MQTT_DEFAULT_USERNAME "orion_device"
+#define MQTT_DEFAULT_PASSWORD "123456789"
 
 // Client settings
 #define MQTT_CLIENT_ID_PREFIX "OrionEM"
@@ -100,7 +100,7 @@ extern String DEVICE_ID;
 #define BLE_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 // ENERGY SENSOR CALIBRATION
-#define VOLTAGE_CALIBRATION 321.17f
+#define VOLTAGE_CALIBRATION 210.1f //321.17f
 #define CURRENT_CALIBRATION_DEFAULT 8.7f
 #define CURRENT_NOISE_THRESHOLD 0.1f
 #define CURRENT_MAX_READING 100.0f
@@ -151,7 +151,7 @@ extern String DEVICE_ID;
 #define TASK_NAME_LED_BATTERY "BatteryLED"
 
 // MDNS CONFIGURATION
-#define MDNS_HOSTNAME "archlinux"
+#define MDNS_HOSTNAME "orion"
 
 // CONNECTIVITY TEST
 #define CONNECTIVITY_TEST_HOST "google.com"

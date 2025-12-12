@@ -3,8 +3,8 @@
 #include <WiFi.h>
 #include <unity.h>
 
-#define TEST_SSID "A72"
-#define TEST_PASSWORD "nono1992"
+#define TEST_SSID "TUNISIETELECOM-2.4G-nG46_Plus"
+#define TEST_PASSWORD "KF39UwaM"
 #define CONNECTION_TIMEOUT_MS 30000
 
 void setUp(void) {

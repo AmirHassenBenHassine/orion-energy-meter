@@ -70,8 +70,11 @@ String generateDeviceId() {
   return String(deviceId);
 }
 
-void delayTask(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
-
+void delayTask(uint32_t ms) { 
+  yield();  // ✅ Feed watchdog BEFORE delay
+  vTaskDelay(pdMS_TO_TICKS(ms));
+  yield();  // ✅ Feed watchdog AFTER delay
+}
 void safeStrCopy(char *dest, const char *src, size_t destSize) {
   if (dest == nullptr || src == nullptr || destSize == 0)
     return;

@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <unity.h>
 
-#define BUTTON_PIN 0
+#define BUTTON_PIN 13
 #define DEBOUNCE_MS 50
 
 void setUp(void) { pinMode(BUTTON_PIN, INPUT_PULLUP); }

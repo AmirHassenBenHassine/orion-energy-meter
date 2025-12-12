@@ -6,7 +6,7 @@
 #define CURRENT_PIN_Y 34
 #define CURRENT_PIN_B 35
 
-#define VOLTAGE_CALIBRATION 234.26
+#define VOLTAGE_CALIBRATION 120.1
 #define CURRENT_CALIBRATION 30.0
 
 void setUp(void) {
