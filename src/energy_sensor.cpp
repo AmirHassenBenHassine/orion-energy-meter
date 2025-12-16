@@ -138,6 +138,8 @@ bool begin() {
     _emonCurrent[i].current(_currentPins[i], _currentCal[i]);
   }
 
+  warmup(10);
+
   _lastMetrics.reset();
   _lastMetrics.deviceId = Utils::generateDeviceId();
   _lastUpdateTime = Utils::millis64();
