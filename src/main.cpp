@@ -10,6 +10,8 @@
 #include "ota_manager.h"
 #include "utils.h"
 #include "wifi_manager.h"
+#include <driver/rtc_io.h>
+#include <esp_sleep.h>
 
 // Global device ID
 String DEVICE_ID;
@@ -20,6 +22,9 @@ RTC_DATA_ATTR uint64_t savedRunTime = 0;
 static uint64_t lastDataSendTime = 0;
 static uint64_t lastTriggerCheck = 0;
 static uint64_t lastOtaCheck = 0;
+// for sleep mode
+static bool inPortalMode = false;
+static bool sleepEnabled = true;
 
 // Current metrics
 static EnergySensor::EnergyMetrics currentMetrics;
@@ -70,6 +75,7 @@ void setup() {
   // Initialize WiFi
   bool forcePortal = (bootMode == ButtonManager::BOOT_WIFI_PAIR);
   WifiManager::begin(forcePortal);
+
   if (!forcePortal) {
     Utils::logMessage("MAIN", "Waiting for WiFi connection...");
     uint32_t wifiWaitStart = millis();
@@ -83,8 +89,29 @@ void setup() {
     if (WifiManager::isFullyConnected()) {
       Utils::logMessage("MAIN", "WiFi connected!");
     } else {
-      Utils::logMessage("MAIN",
-                        "WiFi connection timeout, continuing anyway...");
+      Utils::logMessage("MAIN", "WiFi connection timeout, continuing anyway...");
+      // ✅ Skip MQTT setup and sensor reading
+      lastDataSendTime = Utils::millis64();
+      lastTriggerCheck = Utils::millis64();
+      lastOtaCheck = Utils::millis64();
+      
+      Utils::logMessage("MAIN", "SYSTEM READY (AP Mode - No Network)");
+      return;  // ✅ Exit setup early
+    }
+  } else {
+    // Portal mode - wait for configuration
+    Utils::logMessage("MAIN", "Waiting for WiFi configuration via portal...");
+    
+    while (WifiManager::getState() == WifiManager::WIFI_STATE_PORTAL_ACTIVE ||
+           WifiManager::getState() == WifiManager::WIFI_STATE_AP_MODE) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      yield();
+    }
+    
+    if (!WifiManager::isFullyConnected()) {
+      Utils::logMessage("MAIN", "Portal closed without connection. Restarting...");
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      ESP.restart();
     }
   }
 
@@ -93,36 +120,28 @@ void setup() {
   setupMQTT();
   // FOR FUTURE WITH VPS BROKER
   // setupSecureMQTT();
-  if (WifiManager::isFullyConnected()) {
-    uint32_t mqttWaitStart = millis();
-    while (!MqttManager::isConnected() && (millis() - mqttWaitStart) < 10000) {
-      MqttManager::loop();
-      vTaskDelay(pdMS_TO_TICKS(100));
-      yield();
-    }
-    
-    if (MqttManager::isConnected()) {
-      Utils::logMessage("MAIN", "✓ MQTT connected successfully!");
-    } else {
-      Utils::logMessage("MAIN", "✗ MQTT connection timeout!");
-      Utils::logMessageF("MAIN", "  Error: %s", MqttManager::getLastError().c_str());
-    }
+  uint32_t mqttWaitStart = millis();
+  while (!MqttManager::isConnected() && (millis() - mqttWaitStart) < 10000) {
+    MqttManager::loop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    yield();
+  }
+  
+  if (MqttManager::isConnected()) {
+    Utils::logMessage("MAIN", "✓ MQTT connected successfully!");
+  } else {
+    Utils::logMessage("MAIN", "✗ MQTT connection timeout!");
+    Utils::logMessageF("MAIN", "  Error: %s", MqttManager::getLastError().c_str());
   }
 
   Utils::logMessage("MAIN", "Step 5: Initializing OTA...");
-  // Initialize OTA manager
   OtaManager::begin();
 
   Utils::logMessage("MAIN", "Step 6: Taking initial sensor reading...");
   
   EnergySensor::readSensors(currentMetrics);
   EnergySensor::printMetrics(currentMetrics);
-
-  // ✅ Send initial data (MQTT should be connected now)
   sendData();
-
-  // delay(30000);
-  // OtaManager::markFirmwareValid();
 
   lastDataSendTime = Utils::millis64();
   lastTriggerCheck = Utils::millis64();
@@ -142,14 +161,14 @@ void setupMQTT() {
   MqttManager::setConnectionCallback([](MqttManager::MqttState state) {
     switch (state) {
     case MqttManager::MQTT_STATE_CONNECTED:
-      LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_ON);
+      Utils::logMessage("MQTT", "MQTT connected");
       break;
     case MqttManager::MQTT_STATE_DISCONNECTED:
-      LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_BLINK_SLOW);
+      Utils::logMessage("MQTT", "MQTT disconnected");
       break;
     case MqttManager::MQTT_STATE_TLS_ERROR:
     case MqttManager::MQTT_STATE_AUTH_ERROR:
-      LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_BLINK_FAST);
+      Utils::logMessage("MQTT", "MQTT error");
       break;
     default:
       break;
@@ -258,16 +277,19 @@ void loop() {
   MqttManager::loop();
   OtaManager::loop();
   
+    // Check for MQTT triggers
+  if (now - lastTriggerCheck >= TRIGGER_CHECK_INTERVAL_MS) {
+    handleTriggers();
+    lastTriggerCheck = now;
+  }
+
   // ✅ CHECK BUTTONS IMMEDIATELY (highest priority)
   ButtonManager::ButtonEvent buttonEvent = ButtonManager::checkButtons();
 
    // ✅ WiFi Pairing - 3 second hold
   if (buttonEvent == ButtonManager::BTN_EVENT_LONG_PRESS) {
     Utils::logMessage("MAIN", "⚡ WIFI PAIRING MODE ACTIVATED!");
-    
-    // Disconnect MQTT cleanly
-    MqttManager::disconnect();
-    
+  
     // ✅ Save current WiFi credentials as backup
     String oldSSID = WiFi.SSID();
     String oldPassword = WiFi.psk();
@@ -279,57 +301,157 @@ void loop() {
       Utils::logMessage("MAIN", "No existing WiFi credentials");
     }
     
+        
+  // Disconnect MQTT cleanly
+  MqttManager::disconnect();
+
   // ✅ CRITICAL: Stop WiFi completely
+  WiFi.setAutoReconnect(false);  // ✅ Disable auto-reconnect
   WiFi.disconnect(true);  // true = erase flash credentials temporarily
   WiFi.mode(WIFI_OFF);
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  vTaskDelay(pdMS_TO_TICKS(500));
     
     // Start portal
     Utils::logMessage("MAIN", "Starting configuration portal...");
     Utils::logMessage("MAIN", "Connect to 'OrionSetup' AP to configure WiFi");
+
     WifiManager::startPortal();
+    vTaskDelay(pdMS_TO_TICKS(3000)); // Wait for portal to start
     
-    // Wait for user to configure WiFi
-    while (WifiManager::getState() == WifiManager::WIFI_STATE_PORTAL_ACTIVE ||
-           WifiManager::getState() == WifiManager::WIFI_STATE_AP_MODE) {
+    // ✅ Wait for user to submit credentials
+    Utils::logMessage("MAIN", "Portal active - waiting for configuration...");
+    uint32_t portalStartTime = millis();
+    const uint32_t PORTAL_TIMEOUT = 300000; // 5 minutes
+    bool credentialsReceived = false;
+    String newSSID = "";
+    String newPassword = "";
+    
+    while (true) {
+      WifiManager::WifiState state = WifiManager::getState();
+      
+      // Check timeout
+      if (millis() - portalStartTime > PORTAL_TIMEOUT) {
+        Utils::logMessage("MAIN", "⏱ Portal timeout");
+        break;
+      }
+      
+      // ✅ Check if WiFi is connected (means user submitted credentials)
+      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
+        newSSID = WiFi.SSID();
+        newPassword = WiFi.psk();
+        credentialsReceived = true;
+        
+        Utils::logMessage("MAIN", "✅ Credentials received!");
+        Utils::logMessageF("MAIN", "  SSID: %s", newSSID.c_str());
+        Utils::logMessageF("MAIN", "  IP: %s", WiFi.localIP().toString().c_str());
+        
+        // ✅ CRITICAL: Switch to AP_STA mode to keep both AP and STA active
+        WiFi.mode(WIFI_AP_STA);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        
+        Utils::logMessage("MAIN", "📡 Dual mode active - AP + STA");
+        break;
+      }
+      
+      // Check if portal closed without connection
+      if (state != WifiManager::WIFI_STATE_PORTAL_ACTIVE && 
+          state != WifiManager::WIFI_STATE_AP_MODE &&
+          !credentialsReceived) {
+        Utils::logMessage("MAIN", "Portal closed without credentials");
+        break;
+      }
+      
       vTaskDelay(pdMS_TO_TICKS(1000));
       yield();
     }
+
+    // ✅ Re-enable auto-reconnect for normal operation
+    WiFi.setAutoReconnect(true);  
     
-    // ✅ Check if new WiFi was configured and connected
-    if (WifiManager::isFullyConnected()) {
-      String newSSID = WiFi.SSID();
+   if (credentialsReceived) {
+    // ✅ Now we're in AP_STA mode - send credentials to OrangePi
+    Utils::logMessage("MAIN", "Connecting to MQTT broker...");
+    
+    // Reconnect MQTT (we're now on the new WiFi network)
+    MqttManager::reconnect();
+    
+    uint32_t mqttWaitStart = millis();
+    while (!MqttManager::isConnected() && (millis() - mqttWaitStart) < 15000) {
+      MqttManager::loop();
+      vTaskDelay(pdMS_TO_TICKS(100));
+      yield();
+    }
+    
+    if (MqttManager::isConnected()) {
+      Utils::logMessage("MAIN", "✅ MQTT connected in dual mode");
       
-      Utils::logMessage("MAIN", "✓ WiFi configured successfully!");
-      Utils::logMessageF("MAIN", "  Connected to: %s", newSSID.c_str());
-      Utils::logMessageF("MAIN", "  IP Address: %s", WiFi.localIP().toString().c_str());
+      // ✅ Send credentials to OrangePi
+      Utils::logMessage("MAIN", "📤 Sending credentials to OrangePi...");
+      bool sent = MqttManager::publishWiFiCredentials(newSSID, newPassword);
       
-      // If we switched to a different network, inform user
-      if (hadCredentials && newSSID != oldSSID) {
-        Utils::logMessageF("MAIN", "  Switched from '%s' to '%s'", 
-                          oldSSID.c_str(), newSSID.c_str());
-      }
-      
-      // Reconnect MQTT
-      Utils::logMessage("MAIN", "Reconnecting MQTT...");
-      MqttManager::reconnect();
-      
-      // Wait for MQTT
-      uint32_t mqttWaitStart = millis();
-      while (!MqttManager::isConnected() && (millis() - mqttWaitStart) < 10000) {
-        MqttManager::loop();
-        vTaskDelay(pdMS_TO_TICKS(100));
-        yield();
-      }
-      
-      if (MqttManager::isConnected()) {
-        Utils::logMessage("MAIN", "✓ MQTT reconnected!");
+      if (sent) {
+        Utils::logMessage("MAIN", "✅ Credentials sent!");
+        
+        // ✅ Wait for OrangePi confirmation
+        Utils::logMessage("MAIN", "⏳ Waiting for OrangePi confirmation...");
+        uint32_t confirmStart = millis();
+        
+        while ((millis() - confirmStart) < 60000) { // 60 second timeout
+          MqttManager::loop();
+          
+          // TODO: You can add a flag in mqtt_manager callback to track confirmation
+          // For now, just wait
+          
+          vTaskDelay(pdMS_TO_TICKS(500));
+          yield();
+        }
+        
+        Utils::logMessage("MAIN", "✅ Pairing complete!");
+        LedManager::runSuccessSequence();
+        
+        // ✅ NOW switch to STA mode only (turn off AP)
+        Utils::logMessage("MAIN", "Switching to STA mode...");
+        WiFi.mode(WIFI_STA);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        Utils::logMessage("MAIN", "✅ Pairing process complete!");
+        
       } else {
-        Utils::logMessage("MAIN", "✗ MQTT reconnection failed");
+        Utils::logMessage("MAIN", "❌ Failed to send credentials");
+        
+        LedManager::runErrorSequence();
+        
+        // Switch to STA mode anyway
+        WiFi.mode(WIFI_STA);
       }
-    } 
-    // ✅ Portal closed without connecting
-    else {
+      
+    } else {
+      Utils::logMessage("MAIN", "❌ Failed to connect MQTT in dual mode");
+      
+      // Try to reconnect to old WiFi
+      if (hadCredentials) {
+        Utils::logMessageF("MAIN", "Reverting to: %s", oldSSID.c_str());
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(oldSSID.c_str(), oldPassword.c_str());
+        
+        uint32_t revertStart = millis();
+        while (!WifiManager::isFullyConnected() && (millis() - revertStart) < 20000) {
+          vTaskDelay(pdMS_TO_TICKS(500));
+          yield();
+        }
+        
+        if (WifiManager::isFullyConnected()) {
+          Utils::logMessage("MAIN", "✅ Reverted to old WiFi");
+          MqttManager::reconnect();
+        } else {
+          Utils::logMessage("MAIN", "❌ Failed to revert - restarting");
+          vTaskDelay(pdMS_TO_TICKS(2000));
+          ESP.restart();
+        }
+      }
+    }
+    
+  } else {
       Utils::logMessage("MAIN", "Portal closed without configuration");
       
       // Try to reconnect to old WiFi if we had one
@@ -366,17 +488,6 @@ void loop() {
     // Device will restart
   }
 
-  // // In loop(), add a button check:
-  // if (digitalRead(WIFI_PAIRING_BTN) == LOW) {
-  //   delay(50);  // Debounce
-  //   if (digitalRead(WIFI_PAIRING_BTN) == LOW) {
-  //     printDiagnostics();
-  //     while (digitalRead(WIFI_PAIRING_BTN) == LOW) {
-  //       delay(10);
-  //     }
-  //   }
-  // }
-
   // Check for sensor reading interval
   if (now - lastDataSendTime >= DATA_SEND_INTERVAL_MS) {
     Utils::logMessage("MAIN", "Sensor reading interval reached");
@@ -392,13 +503,16 @@ void loop() {
     sendData();
 
     lastDataSendTime = now;
-  }
 
-  // Check for MQTT triggers
-  if (now - lastTriggerCheck >= TRIGGER_CHECK_INTERVAL_MS) {
+    // just in case process any pending triggers
+    MqttManager::loop();
     handleTriggers();
-    lastTriggerCheck = now;
+
+    if (sleepEnabled && !inPortalMode && !WifiManager::isPortalActive()) {
+      enterLightSleep();
+    }
   }
+  
 
   // Check for OTA updates periodically
   if (OtaManager::shouldCheckNow(lastOtaCheck)) {
@@ -408,7 +522,7 @@ void loop() {
     }
     lastOtaCheck = now;
   }
-
+  MqttManager::loop();
   Utils::delayTask(100);
 }
 
@@ -421,6 +535,7 @@ void handleBootMode(ButtonManager::BootMode mode) {
 
   case ButtonManager::BOOT_WIFI_PAIR:
     Utils::logMessage("MAIN", "Entering WiFi pairing mode...");
+    inPortalMode = true;
     WifiManager::startPortal();
     break;
 
@@ -455,6 +570,15 @@ void handleTriggers() {
       OtaManager::performUpdate();
     }
   }
+  // configurable sleep options added in case in future if we need something
+  // like this
+  else if (action == "sleep_on") {
+    sleepEnabled = true;
+    Utils::logMessage("MAIN", "Sleep enabled");
+  } else if (action == "sleep_off") {
+    sleepEnabled = false;
+    Utils::logMessage("MAIN", "Sleep disabled");
+  }
 
   MqttManager::clearPendingTrigger();
 }
@@ -472,4 +596,99 @@ void sendData() {
   if (!sent) {
     Utils::logMessage("MAIN", "Warning: No transmission channel available");
   }
+}
+
+void enterLightSleep() {
+
+  uint32_t sleepDurationSec = WAKEUP_TIME_MS / 1000;
+  Utils::logMessageF("MAIN", "Entering light sleep for %lu seconds...",
+                     sleepDurationSec);
+
+  // turn off all led other then power
+  LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_OFF);
+  LedManager::setMode(LedManager::LED_CHARGING, LedManager::LED_OFF);
+  LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_OFF);
+  Utils::delayTask(100);
+
+  if (MqttManager::isConnected()) {
+    MqttManager::disconnect();
+    Utils::delayTask(100);
+  }
+
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  Utils::delayTask(100);
+
+  // Disable all wake sources first
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+
+  uint64_t sleepTimeUs = (uint64_t)WAKEUP_TIME_MS * 1000ULL;
+  esp_sleep_enable_timer_wakeup(sleepTimeUs);
+
+  // wake up on hard reset button and on wifi pairing button
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)HARD_RESET_BTN, 1);
+  uint64_t ext1Mask = (1ULL << WIFI_PAIRING_BTN);
+  esp_sleep_enable_ext1_wakeup(ext1Mask, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+  Serial.flush();
+  uint64_t sleepStart = millis();
+
+  esp_light_sleep_start();
+
+  uint64_t sleepDuration = millis() - sleepStart;
+  esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
+
+  const char *reasonStr = "Unknown";
+  switch (wakeReason) {
+  case ESP_SLEEP_WAKEUP_TIMER:
+    reasonStr = "Timer";
+    break;
+  case ESP_SLEEP_WAKEUP_EXT0:
+    reasonStr = "Hard Reset Button";
+    break;
+  case ESP_SLEEP_WAKEUP_EXT1:
+    reasonStr = "WiFi Button";
+    break;
+  default:
+    break;
+  }
+
+  Utils::logMessageF("MAIN", "Woke up after %lu ms, reason: %s",
+                     (unsigned long)sleepDuration, reasonStr);
+
+  if (wakeReason == ESP_SLEEP_WAKEUP_EXT0) {
+    ButtonManager::performHardReset();
+    return;
+  }
+
+  if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
+    inPortalMode = true;
+  }
+
+  // Reconnect WiFi
+  WiFi.mode(WIFI_STA);
+  WifiManager::forceReconnect();
+
+  uint32_t wifiStart = millis();
+
+  while (!WifiManager::isFullyConnected() && (millis() - wifiStart) < 15000) {
+    Utils::delayTask(500);
+  }
+
+  if (WifiManager::isFullyConnected()) {
+    if (inPortalMode) {
+      WifiManager::startPortal();
+      // reset flag
+      inPortalMode = false;
+      return;
+    }
+
+    uint32_t mqttStart = millis();
+    while (!MqttManager::isConnected() && (millis() - mqttStart) < 10000) {
+      MqttManager::loop();
+      Utils::delayTask(500);
+    }
+  }
+
+  BatteryManager::update();
 }

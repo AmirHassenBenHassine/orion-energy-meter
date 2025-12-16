@@ -192,6 +192,14 @@ bool publishScanResults(const String &networksJson);
 bool publishConfirmation(const String &ssid);
 
 /**
+ * Publish WiFi credentials to gateway
+ * @param ssid WiFi SSID
+ * @param password WiFi password
+ * @return true if published successfully
+ */
+bool publishWiFiCredentials(const String &ssid, const String &password);
+
+/**
  * Subscribe to a topic
  * @param topic Topic to subscribe to
  * @param qos QoS level

@@ -6,6 +6,7 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFiManager.h>
+#include <esp_task_wdt.h>
 
 namespace WifiManager {
 
@@ -34,6 +35,8 @@ static const uint32_t NOTIFY_SHUTDOWN = 4;
 static const uint32_t NOTIFY_FORCE_RECONNECT = 5;
 static const uint32_t NOTIFY_START_PORTAL = 6;
 
+// static void _sendCredentialsToGateway(const String& ssid, const String& password); //New sending credentials function   
+// Generate device ID DEVICE_ID = Utils::generateDeviceId();
 static void _wifiTask(void *parameter);
 static void _onWiFiEvent(WiFiEvent_t event);
 static void _setupWiFiManager(::WiFiManager &wm);
@@ -58,7 +61,7 @@ bool begin(bool forcePortal) {
   // Start WiFi task
   BaseType_t result = xTaskCreatePinnedToCore(
       _wifiTask, TASK_NAME_WIFI, TASK_STACK_SIZE_LARGE, nullptr,
-      TASK_PRIORITY_HIGH, &_wifiTaskHandle, TASK_CORE_0);
+      TASK_PRIORITY_HIGH, &_wifiTaskHandle, TASK_CORE_1);
 
   if (result != pdPASS) {
     Utils::logMessage("WIFI", "Failed to create WiFi task");
@@ -122,6 +125,11 @@ void startPortal() {
   if (_wifiTaskHandle != nullptr) {
     xTaskNotify(_wifiTaskHandle, NOTIFY_START_PORTAL, eSetValueWithOverwrite);
   }
+}
+
+bool isPortalActive() {
+  return _currentState == WIFI_STATE_PORTAL_ACTIVE ||
+         _currentState == WIFI_STATE_AP_MODE;
 }
 
 void forceReconnect() {
@@ -244,8 +252,22 @@ bool testConnectivity() {
 
 String scanNetworks() {
   Utils::logMessage("WIFI", "Scanning networks...");
-  int n = WiFi.scanNetworks();
 
+  WiFi.scanNetworks(true);
+
+  int n = -1;
+  int attempts = 0;
+  while (n < 0 && attempts < 100) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    n = WiFi.scanComplete();
+    attempts++;
+  }
+
+  if (n < 0) {
+    Utils::logMessage("WIFI", "Scan timed out");
+    WiFi.scanDelete();
+    return "[]";
+  }
   String json = "[";
   for (int i = 0; i < n; i++) {
     if (i > 0)
@@ -347,8 +369,8 @@ static void _setupWiFiManager(::WiFiManager &wm) {
   wm.setSaveConfigCallback([]() {
     Utils::logMessage("WIFI", "Configuration saved");
     LedManager::runSuccessSequence();
-    Utils::delayTask(500);
-    ESP.restart();
+    // Utils::delayTask(500);
+    // ESP.restart();
   });
 }
 
@@ -401,6 +423,9 @@ static void _wifiTask(void *parameter) {
   uint32_t notification;
   _taskShouldRun = true;
 
+  // remove from watch dog
+  esp_task_wdt_delete(xTaskGetCurrentTaskHandle());
+  
   // Create WiFiManager on heap
   ::WiFiManager *wm = new ::WiFiManager();
   if (!wm) {

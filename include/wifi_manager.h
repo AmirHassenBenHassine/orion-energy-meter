@@ -70,6 +70,8 @@ IPAddress getAPIP();
  */
 void startPortal();
 
+bool isPortalActive();
+
 /**
  *   Force reconnection attempt
  */

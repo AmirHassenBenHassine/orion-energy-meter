@@ -34,10 +34,10 @@ extern String DEVICE_ID;
 #define BATTERY_VOLTAGE_PIN 36
 
 // TIMING CONSTANTS
-#define DATA_SEND_INTERVAL_MS 30000*20     // 30 seconds
-#define TRIGGER_CHECK_INTERVAL_MS 60000 // 1 minute
-#define WAKEUP_TIME_US 60000            // 1 minute
-#define OTA_CHECK_INTERVAL_MS 86400000  // 24 hours
+#define DATA_SEND_INTERVAL_MS 30000      // 30 seconds
+#define TRIGGER_CHECK_INTERVAL_MS 60000  // 1 minute
+#define WAKEUP_TIME_MS 300000            // 5 minute
+#define OTA_CHECK_INTERVAL_MS 86400000   // 24 hours
 
 // LED TIMING
 #define LED_BLINK_FAST_MS 200
@@ -93,6 +93,8 @@ extern String DEVICE_ID;
 #define MQTT_TOPIC_STATUS "orion/status"
 #define MQTT_TOPIC_SCAN "orion/scan"
 #define MQTT_TOPIC_CONFIRM "orion/confirm"
+#define MQTT_TOPIC_WIFI_CREDENTIALS "orion/wifi_credentials"  // ESP32 → OrangePi
+#define MQTT_TOPIC_PAIRING_STATUS "pairing/status"            // Bidirectional
 
 // BLE CONFIGURATION
 #define BLE_DEVICE_NAME "ESP32-Orion"
@@ -101,7 +103,7 @@ extern String DEVICE_ID;
 
 // ENERGY SENSOR CALIBRATION
 #define VOLTAGE_CALIBRATION 210.1f //321.17f
-#define CURRENT_CALIBRATION_DEFAULT 8.7f
+#define CURRENT_CALIBRATION_DEFAULT 7.5f
 #define CURRENT_NOISE_THRESHOLD 0.1f
 #define CURRENT_MAX_READING 100.0f
 #define VOLTAGE_NOMINAL_US 120.0f

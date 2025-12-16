@@ -339,6 +339,32 @@ bool publishConfirmation(const String &ssid) {
   return publish(MQTT_TOPIC_CONFIRM, payload.c_str(), true, 1);
 }
 
+bool publishWiFiCredentials(const String &ssid, const String &password) {
+  if (!isConnected()) {
+    Utils::logMessage("MQTT", "Cannot send credentials - not connected");
+    return false;
+  }
+
+  JsonDocument doc;
+  doc["ssid"] = ssid;
+  doc["password"] = password;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  Utils::logMessageF("MQTT", "Sending WiFi credentials for SSID: %s", ssid.c_str());
+  
+  bool success = publish(MQTT_TOPIC_WIFI_CREDENTIALS, payload.c_str(), false, 1);
+  
+  if (success) {
+    Utils::logMessage("MQTT", "✓ Credentials sent to OrangePi");
+  } else {
+    Utils::logMessage("MQTT", "✗ Failed to send credentials");
+  }
+  
+  return success;
+}
+
 bool subscribe(const char *topic, uint8_t qos) {
   if (!isConnected())
     return false;
@@ -572,6 +598,8 @@ static void _subscribeToTopics() {
   subscribe(MQTT_TOPIC_TRIGGER, 1);
   subscribe(MQTT_TOPIC_REFRESH, 1);
   subscribe(MQTT_TOPIC_CONFIG, 1);
+  subscribe(MQTT_TOPIC_PAIRING_STATUS, 1);  // ✅ Added this
+
 }
 
 static void _mqttCallback(char *topic, byte *payload, unsigned int length) {
@@ -588,7 +616,50 @@ static void _mqttCallback(char *topic, byte *payload, unsigned int length) {
 
   String topicStr = String(topic);
 
-  if (topicStr == MQTT_TOPIC_TRIGGER) {
+  // ✅ Handle pairing status from OrangePi
+  if (topicStr == MQTT_TOPIC_PAIRING_STATUS) {
+    JsonDocument doc;
+    if (deserializeJson(doc, message) == DeserializationError::Ok) {
+      String status = doc["status"].as<String>();
+      
+      if (status == "starting") {
+        Utils::logMessage("MQTT", "📱 OrangePi: Starting pairing process...");
+        // LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_FAST);
+      }
+      else if (status == "paired") {
+        Utils::logMessage("MQTT", "✅ OrangePi: Successfully paired!");
+        // LedManager::runSuccessSequence();
+      }
+      else if (status == "failed") {
+        Utils::logMessage("MQTT", "❌ OrangePi: Pairing failed");
+        // LedManager::runErrorSequence();
+      }
+      else if (status == "configuring") {
+        Utils::logMessage("MQTT", "⚙️ OrangePi: Entering configuration mode");
+        // LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_SLOW);
+      }
+      else if (status == "ready_to_configure") {
+        Utils::logMessage("MQTT", "📶 OrangePi: Ready for WiFi configuration");
+        // LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_AP);
+      }
+      else if (status == "wifi_configured") {
+        Utils::logMessage("MQTT", "✅ OrangePi confirmed WiFi configuration!");
+        // LedManager::runSuccessSequence();
+      }
+      else if (status == "connection_failed") {
+        Utils::logMessage("MQTT", "⚠️ OrangePi failed to connect to WiFi");
+        String error = doc["error"].as<String>();
+        if (error.length() > 0) {
+          Utils::logMessageF("MQTT", "Error: %s", error.c_str());
+        }
+        // LedManager::runErrorSequence();
+      }
+      else if (status == "disconnected") {
+        Utils::logMessage("MQTT", "🔌 OrangePi: WiFi disconnected");
+        // LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_SLOW);
+      }
+    }
+  } else if (topicStr == MQTT_TOPIC_TRIGGER) {
     JsonDocument doc;
     if (deserializeJson(doc, message) == DeserializationError::Ok) {
       String action = doc["action"].as<String>();

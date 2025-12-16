@@ -45,6 +45,12 @@ struct EnergyMetrics {
 bool begin();
 
 /**
+ *   Check if CT sensors are connected
+ * @param phase Phase index (0-2)
+ */
+bool isPhaseConnected(int phase);
+
+/**
  *   Stop energy sensor monitoring
  */
 void stop();

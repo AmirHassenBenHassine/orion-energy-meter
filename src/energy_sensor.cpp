@@ -7,6 +7,11 @@
 
 namespace EnergySensor {
 
+// Add near the top with other static variables
+static bool _ctConnected[MAX_PHASES] = {false, false, false};
+static uint32_t _lastCtCheck[MAX_PHASES] = {0, 0, 0};
+static const uint32_t CT_CHECK_INTERVAL = 5000; // Check every 5 seconds
+
 // EmonLib instances
 static EnergyMonitor _emonCurrent[MAX_PHASES];
 static EnergyMonitor _emonVoltage;
@@ -68,6 +73,58 @@ void EnergyMetrics::reset() {
   }
 }
 
+bool isPhaseConnected(int phase) {
+  if (phase >= 0 && phase < MAX_PHASES) {
+    return _ctConnected[phase];
+  }
+  return false;
+} 
+
+// Add the detection function
+static bool isCtConnected(int phase) {
+  if (phase < 0 || phase >= MAX_PHASES) {
+    return false;
+  }
+  
+  int pin = _currentPins[phase];
+  
+  // Take quick samples
+  const int samples = 50;
+  int readings[samples];
+  
+  for (int i = 0; i < samples; i++) {
+    readings[i] = analogRead(pin);
+    delayMicroseconds(100);
+  }
+  
+  // Calculate range (max - min)
+  int minVal = 4095;
+  int maxVal = 0;
+  
+  for (int i = 0; i < samples; i++) {
+    if (readings[i] < minVal) minVal = readings[i];
+    if (readings[i] > maxVal) maxVal = readings[i];
+  }
+  
+  int range = maxVal - minVal;
+  
+  // Debug output
+  // Utils::logMessageF("SENSOR", "Phase %d: range=%d, min=%d, max=%d", 
+  //                    phase + 1, range, minVal, maxVal);
+  
+  // Floating pins have huge range (your data shows 0-3445)
+  // Connected CTs should have smaller, consistent range around 1800-1900
+  const int MAX_ACCEPTABLE_RANGE = 1200;
+  
+  if (range > MAX_ACCEPTABLE_RANGE) {
+    // Utils::logMessageF("SENSOR", "Phase %d: DISCONNECTED (range too high)", phase + 1);
+    return false; // Disconnected/floating
+  }
+  
+  // Utils::logMessageF("SENSOR", "Phase %d: CONNECTED", phase + 1);
+  return true;
+}
+
 bool begin() {
   if (_initialized) {
     return true;
@@ -75,7 +132,7 @@ bool begin() {
 
   analogReadResolution(12);
 
-  _emonVoltage.voltage(VOLTAGE_PIN, _voltageCal, 1.7);
+  // _emonVoltage.voltage(VOLTAGE_PIN, _voltageCal, 1.7);
 
   for (int i = 0; i < MAX_PHASES; i++) {
     _emonCurrent[i].current(_currentPins[i], _currentCal[i]);
@@ -84,6 +141,15 @@ bool begin() {
   _lastMetrics.reset();
   _lastMetrics.deviceId = Utils::generateDeviceId();
   _lastUpdateTime = Utils::millis64();
+
+    // Detect CT sensors on startup
+  Utils::logMessage("SENSOR", "Detecting CT sensors...");
+  delay(100); // Brief settling time
+  
+  for (int i = 0; i < MAX_PHASES; i++) {
+    _ctConnected[i] = isCtConnected(i);
+    _lastCtCheck[i] = millis();
+  }
 
   _initialized = true;
   Utils::logMessage("SENSOR", "Energy sensors initialized");
@@ -104,14 +170,40 @@ void readSensors(EnergyMetrics &metrics) {
 
   uint64_t currentTime = Utils::millis64();
 
-  // Read voltage
-  _emonVoltage.calcVI(20, 2000);
-  metrics.voltage = _emonVoltage.Vrms;
+  const int numSamples = 500;
+  double sumV = 0;
+  double offsetV = 2048.0;
 
+  for (int i = 0; i < numSamples; i++) {
+    int rawV = analogRead(VOLTAGE_PIN);
+    double filteredV = rawV - offsetV;
+    sumV += filteredV * filteredV;
+    sumV += rawV * rawV;
+    delayMicroseconds(200);
+  }
+
+  metrics.voltage = sqrt(sumV / numSamples) * _voltageCal / 2048.0;
+
+  // _emonVoltage.calcVI(20, 2000);
+  // metrics.voltage = _emonVoltage.Vrms;
   // Read current for each phase
   metrics.totalPower = 0;
 
   for (int i = 0; i < MAX_PHASES; i++) {
+    // Periodically recheck CT connection status
+    uint32_t now = millis();
+    if (now - _lastCtCheck[i] > CT_CHECK_INTERVAL) {
+      _ctConnected[i] = isCtConnected(i);
+      _lastCtCheck[i] = now;
+    }
+    
+    // If CT is not connected, set values to zero and skip
+    if (!_ctConnected[i]) {
+      metrics.current[i] = 0;
+      metrics.power[i] = 0;
+      continue;
+    }
+
     float current = _emonCurrent[i].calcIrms(1480);
 
     // Apply noise threshold
@@ -122,6 +214,8 @@ void readSensors(EnergyMetrics &metrics) {
     // Clamp to max
     if (current > CURRENT_MAX_READING) {
       current = 0;
+      _ctConnected[i] = false; // Mark for immediate recheck
+      _lastCtCheck[i] = 0;
     }
 
     metrics.current[i] = current;
@@ -178,8 +272,11 @@ void warmup(int iterations) {
   Utils::logMessage("SENSOR", "Starting sensor warmup...");
 
   for (int i = 0; i < iterations; i++) {
-    _emonVoltage.calcVI(20, 2000);
-
+    for (int k = 0; k < 50; k++) {
+      analogRead(VOLTAGE_PIN);
+      delayMicroseconds(100);
+    }
+    
     for (int j = 0; j < MAX_PHASES; j++) {
       _emonCurrent[j].calcIrms(1480);
     }
@@ -200,7 +297,9 @@ void printMetrics(const EnergyMetrics &metrics) {
   Serial.printf("Energy Total       : %.3f kWh\n", metrics.energyTotal);
 
   for (int i = 0; i < MAX_PHASES; i++) {
-    Serial.printf("\n  Phase %d:\n", i + 1);
+    Serial.printf("\n  Phase %d [%s]:\n", 
+                  i + 1, 
+                  _ctConnected[i] ? "CONNECTED" : "DISCONNECTED");
     Serial.printf("    Current        : %.2f A\n", metrics.current[i]);
     Serial.printf("    Power          : %.2f W\n", metrics.power[i]);
   }

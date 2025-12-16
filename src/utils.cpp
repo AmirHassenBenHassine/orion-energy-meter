@@ -32,13 +32,15 @@ String getFormattedTimestamp() {
 }
 
 bool configureNTP() {
-  configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+  // added extra ntp servers in case the configured is down or something
+  configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER,
+             "time.google.com", "time.nist.gov");
 
   Serial.print("NTP Syncing time");
   time_t now = time(nullptr);
   int attempts = 0;
 
-  while (now < 1000000000 && attempts < 20) {
+  while (now < 1000000000 && attempts < 30) {
     delay(500);
     Serial.print(".");
     now = time(nullptr);

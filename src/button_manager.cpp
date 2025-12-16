@@ -128,7 +128,7 @@ ButtonEvent checkButtons() {
       uint32_t duration = millis() - state->pressedTime;
       
       // ✅ WiFi Pairing Button - LONG PRESS (3 seconds)
-      if (button == BTN_WIFI_PAIRING && duration >= LONG_PRESS_MIN_MS) {
+      if (button == BTN_WIFI_PAIRING && duration >= LONG_PRESS_MIN_MS && duration < VERY_LONG_PRESS_MIN_MS) {
         _actionTriggered[button] = true;
         Utils::logMessage("BUTTON", "⚡ WiFi Pairing - LONG PRESS detected!");
         LedManager::runSuccessSequence();
