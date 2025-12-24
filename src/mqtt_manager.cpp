@@ -194,7 +194,12 @@ void loop() {
     return;
   }
 
-  if (!WifiManager::isFullyConnected()) {
+  // ✅ Check if we're in AP mode
+  WiFiMode_t mode = WiFi.getMode();
+  bool isAPMode = (mode == WIFI_AP || mode == WIFI_AP_STA);
+  
+  // ✅ In AP mode, we don't need isFullyConnected check
+  if (!isAPMode && !WifiManager::isFullyConnected()) {
     if (_currentState == MQTT_STATE_CONNECTED) {
       _setState(MQTT_STATE_DISCONNECTED);
       _stats.disconnects++;
@@ -345,6 +350,10 @@ bool publishWiFiCredentials(const String &ssid, const String &password) {
     return false;
   }
 
+  // ✅ Log connection state
+  Utils::logMessageF("MQTT", "MQTT state: %s", stateToString(_currentState));
+  Utils::logMessageF("MQTT", "WiFi state: %s", WiFi.isConnected() ? "connected" : "disconnected");
+  
   JsonDocument doc;
   doc["ssid"] = ssid;
   doc["password"] = password;
@@ -354,12 +363,16 @@ bool publishWiFiCredentials(const String &ssid, const String &password) {
 
   Utils::logMessageF("MQTT", "Sending WiFi credentials for SSID: %s", ssid.c_str());
   
-  bool success = publish(MQTT_TOPIC_WIFI_CREDENTIALS, payload.c_str(), false, 1);
+  bool success = _mqttClient->publish(MQTT_TOPIC_WIFI_CREDENTIALS, payload.c_str());
   
   if (success) {
     Utils::logMessage("MQTT", "✓ Credentials sent to OrangePi");
+    _stats.messagesPublished++;
+
   } else {
     Utils::logMessage("MQTT", "✗ Failed to send credentials");
+    _stats.messagesPublished++;
+
   }
   
   return success;
@@ -485,7 +498,35 @@ static void _setupTLS() {
 }
 
 static bool _connect() {
-  if (!WifiManager::isFullyConnected()) {
+  // ✅ Validate MQTT client exists
+  if (_mqttClient == nullptr) {
+    _lastError = "MQTT client not initialized";
+    Utils::logMessage("MQTT", "ERROR: MQTT client is null");
+    return false;
+  }
+  
+  // ✅ Validate broker configuration
+  if (_brokerHost == nullptr || strlen(_brokerHost) == 0) {
+    _lastError = "Broker host not configured";
+    Utils::logMessage("MQTT", "ERROR: Broker host is null or empty");
+    return false;
+  }
+  
+  if (_brokerPort == 0) {
+    _lastError = "Invalid broker port";
+    Utils::logMessage("MQTT", "ERROR: Broker port is 0");
+    return false;
+  }
+  
+  // ✅ Check if we're in AP mode first
+  WiFiMode_t mode = WiFi.getMode();
+  bool isAPMode = (mode == WIFI_AP || mode == WIFI_AP_STA);
+  
+  if (isAPMode) {
+    Utils::logMessage("MQTT", "Connecting over AP mode");
+    // In AP mode, broker should be reachable directly
+    _mqttClient->setServer(_brokerHost, _brokerPort);
+  } else if (!WifiManager::isFullyConnected()) {
     _lastError = "WiFi not connected";
     return false;
   }
@@ -501,7 +542,7 @@ static bool _connect() {
     String hostname = host.substring(0, host.length() - 6);
     Utils::logMessageF("MQTT", "Resolving mDNS: %s.local", hostname.c_str());
 
-    brokerIP = MDNS.queryHost(hostname.c_str(), 5000); // 5 second timeout
+    brokerIP = MDNS.queryHost(hostname.c_str(), 10000); // 5 second timeout
 
     if (brokerIP == IPAddress(0, 0, 0, 0)) {
       _lastError = "mDNS resolution failed for " + host;
@@ -513,12 +554,35 @@ static bool _connect() {
     Utils::logMessageF("MQTT", "Resolved %s -> %s", _brokerHost,
                        brokerIP.toString().c_str());
 
+    // ✅ Validate client before calling setServer
+    if (_mqttClient == nullptr) {
+      _lastError = "MQTT client became null";
+      Utils::logMessage("MQTT", "ERROR: MQTT client is null before setServer");
+      return false;
+    }
+    
     _mqttClient->setServer(brokerIP, _brokerPort);
+  } else {
+    // ✅ For non-mDNS hosts, also call setServer
+    if (_mqttClient == nullptr) {
+      _lastError = "MQTT client became null";
+      Utils::logMessage("MQTT", "ERROR: MQTT client is null before setServer");
+      return false;
+    }
+    
+    _mqttClient->setServer(_brokerHost, _brokerPort);
   }
 
   Utils::logMessageF("MQTT", "Connecting to %s:%d...", _brokerHost,
                      _brokerPort);
 
+  // ✅ Final check before connect
+  if (_mqttClient == nullptr) {
+    _lastError = "MQTT client became null";
+    Utils::logMessage("MQTT", "ERROR: MQTT client is null before connect");
+    return false;
+  }
+                       
   String clientId = _generateClientId();
   bool connected = false;
 
@@ -536,9 +600,14 @@ static bool _connect() {
     _stats.lastConnectedTime = Utils::millis64();
     _reconnectAttempts = 0;
     _subscribeToTopics();
-    publishStatus("STA", WiFi.localIP().toString());
+
+    // ✅ Only publish status if not in AP mode
+    if (!isAPMode) {
+      publishStatus("STA", WiFi.localIP().toString());
+    }
+    
     return true;
-  } else {
+  }  else {
     int state = _mqttClient->state();
     _stats.connectFailures++;
 

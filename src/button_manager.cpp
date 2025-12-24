@@ -296,10 +296,10 @@ void performHardReset() {
     delay(100);
   }
 
-   // ✅ CRITICAL: Erase WiFi credentials from ESP32 NVS
-  Utils::logMessage("BUTTON", "Erasing WiFi credentials from flash...");
-  WiFi.disconnect(true, true);  // disconnect(wifioff, eraseap)
-  delay(100);
+  //  // ✅ CRITICAL: Erase WiFi credentials from ESP32 NVS
+  // Utils::logMessage("BUTTON", "Erasing WiFi credentials from flash...");
+  // WiFi.disconnect(true, true);  // disconnect(wifioff, eraseap)
+  // delay(100);
   
   // ✅ Also use WifiManager to clear
   Utils::logMessage("BUTTON", "Clearing WiFi via WifiManager...");
@@ -329,20 +329,14 @@ void performHardReset() {
   }
 
   // ✅ Force erase entire NVS partition (nuclear option)
-  Utils::logMessage("BUTTON", "Erasing NVS partition...");
-  nvs_flash_erase();  // Erase entire NVS
-  nvs_flash_init();   // Reinitialize
+  // Utils::logMessage("BUTTON", "Erasing NVS partition...");
+  // nvs_flash_erase();  // Erase entire NVS
+  // nvs_flash_init();   // Reinitialize
   
   // Final confirmation blink
-  for (int i = 0; i < 3; i++) {
-    LedManager::setState(LedManager::LED_POWER, false);
-    delay(200);
-    LedManager::setState(LedManager::LED_POWER, true);
-    delay(200);
-  }
 
   Utils::logMessage("BUTTON", "All data erased. Restarting...");
-  delay(1000);
+  delay(100);
 
   ESP.restart();
 }
@@ -455,6 +449,42 @@ static void _processButton(ButtonId button) {
     _actionTriggered[button] = false;  // ✅ Reset action flag
     _triggerEvent(button, BTN_EVENT_PRESSED);
   }
+  // Button being held - check thresholds
+  else if (currentState && state->isPressed) {
+    state->pressDuration = now - state->pressedTime;
+    
+    // ✅ Check for WiFi pairing (3 seconds)
+    if (button == BTN_WIFI_PAIRING && 
+        state->pressDuration >= LONG_PRESS_MIN_MS && 
+        state->pressDuration < VERY_LONG_PRESS_MIN_MS &&
+        !_actionTriggered[button]) {
+      
+      _actionTriggered[button] = true;
+      Utils::logMessage("BUTTON", "⚡ WiFi Pairing triggered!");
+      LedManager::runSuccessSequence();
+      WifiManager::startPortal();
+
+      // ✅ Call immediate callback
+      if (_immediateActionCallback != nullptr) {
+        _immediateActionCallback(button, BTN_EVENT_LONG_PRESS);
+      }
+    }
+    
+    // ✅ Check for hard reset (5 seconds)
+    if (button == BTN_HARD_RESET && 
+        state->pressDuration >= VERY_LONG_PRESS_MIN_MS &&
+        !_actionTriggered[button]) {
+      
+      _actionTriggered[button] = true;
+      Utils::logMessage("BUTTON", "⚡ Hard Reset triggered!");
+      LedManager::runErrorSequence();
+      performHardReset();
+      // ✅ Call immediate callback
+      if (_immediateActionCallback != nullptr) {
+        _immediateActionCallback(button, BTN_EVENT_VERY_LONG_PRESS);
+      }
+    }
+  }  
   // Button just released
   else if (!currentState && state->isPressed) {
     state->isPressed = false;
