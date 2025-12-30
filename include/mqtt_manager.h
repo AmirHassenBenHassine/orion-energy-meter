@@ -137,6 +137,12 @@ void reconnect();
  */
 void disconnect();
 
+// the new getter functions
+bool isWaitingForConfirmation();
+bool hasReceivedConfirmation();
+String getConfirmedSSID();
+void clearConfirmation();
+
 /**
  * Set broker credentials at runtime
  * @param username MQTT username

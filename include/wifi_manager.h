@@ -66,9 +66,10 @@ IPAddress getLocalIP();
 IPAddress getAPIP();
 
 /**
- *   Force start captive portal for configuration
+ * Start configuration portal manually
+ * @param triggeredByButton true if triggered by button press, false if auto-started
  */
-void startPortal();
+void startPortal(bool triggeredByButton = false);
 
 bool isPortalActive();
 

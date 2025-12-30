@@ -336,9 +336,9 @@ void performHardReset() {
   // Final confirmation blink
 
   Utils::logMessage("BUTTON", "All data erased. Restarting...");
-  delay(100);
+  delay(1000);
 
-  ESP.restart();
+  // ESP.restart();
 }
 
 void setEventCallback(ButtonEventCallback callback) {
@@ -449,43 +449,43 @@ static void _processButton(ButtonId button) {
     _actionTriggered[button] = false;  // ✅ Reset action flag
     _triggerEvent(button, BTN_EVENT_PRESSED);
   }
-  // Button being held - check thresholds
-  else if (currentState && state->isPressed) {
-    state->pressDuration = now - state->pressedTime;
+  // // Button being held - check thresholds
+  // else if (currentState && state->isPressed) {
+  //   state->pressDuration = now - state->pressedTime;
     
-    // ✅ Check for WiFi pairing (3 seconds)
-    if (button == BTN_WIFI_PAIRING && 
-        state->pressDuration >= LONG_PRESS_MIN_MS && 
-        state->pressDuration < VERY_LONG_PRESS_MIN_MS &&
-        !_actionTriggered[button]) {
+  //   // ✅ Check for WiFi pairing (3 seconds)
+  //   if (button == BTN_WIFI_PAIRING && 
+  //       state->pressDuration >= LONG_PRESS_MIN_MS && 
+  //       state->pressDuration < VERY_LONG_PRESS_MIN_MS &&
+  //       !_actionTriggered[button]) {
       
-      _actionTriggered[button] = true;
-      Utils::logMessage("BUTTON", "⚡ WiFi Pairing triggered!");
-      LedManager::runSuccessSequence();
-      WifiManager::startPortal();
+  //     _actionTriggered[button] = true;
+  //     Utils::logMessage("BUTTON", "⚡ WiFi Pairing triggered!");
+  //     LedManager::runSuccessSequence();
+  //     WifiManager::startPortal();
 
-      // ✅ Call immediate callback
-      if (_immediateActionCallback != nullptr) {
-        _immediateActionCallback(button, BTN_EVENT_LONG_PRESS);
-      }
-    }
+  //     // ✅ Call immediate callback
+  //     if (_immediateActionCallback != nullptr) {
+  //       _immediateActionCallback(button, BTN_EVENT_LONG_PRESS);
+  //     }
+  //   }
     
-    // ✅ Check for hard reset (5 seconds)
-    if (button == BTN_HARD_RESET && 
-        state->pressDuration >= VERY_LONG_PRESS_MIN_MS &&
-        !_actionTriggered[button]) {
+  //   // ✅ Check for hard reset (5 seconds)
+  //   if (button == BTN_HARD_RESET && 
+  //       state->pressDuration >= VERY_LONG_PRESS_MIN_MS &&
+  //       !_actionTriggered[button]) {
       
-      _actionTriggered[button] = true;
-      Utils::logMessage("BUTTON", "⚡ Hard Reset triggered!");
-      LedManager::runErrorSequence();
-      performHardReset();
-      // ✅ Call immediate callback
-      if (_immediateActionCallback != nullptr) {
-        _immediateActionCallback(button, BTN_EVENT_VERY_LONG_PRESS);
-      }
-    }
-  }  
-  // Button just released
+  //     _actionTriggered[button] = true;
+  //     Utils::logMessage("BUTTON", "⚡ Hard Reset triggered!");
+  //     LedManager::runErrorSequence();
+  //     performHardReset();
+  //     // ✅ Call immediate callback
+  //     if (_immediateActionCallback != nullptr) {
+  //       _immediateActionCallback(button, BTN_EVENT_VERY_LONG_PRESS);
+  //     }
+  //   }
+  // }  
+  // // Button just released
   else if (!currentState && state->isPressed) {
     state->isPressed = false;
     state->releasedTime = now;

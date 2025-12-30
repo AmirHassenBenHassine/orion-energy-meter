@@ -56,12 +56,35 @@ static MqttStats _stats;
 static uint64_t _lastReconnectAttempt = 0;
 static uint32_t _reconnectAttempts = 0;
 
+// At the top with other static variables
+static volatile bool _waitingForConfirmation = false;
+static volatile bool _confirmationReceived = false;
+static String _confirmedSSID = "";
+
 static void _mqttCallback(char *topic, byte *payload, unsigned int length);
 static bool _connect();
 static void _subscribeToTopics();
 static void _setState(MqttState newState);
 static String _generateClientId();
 static void _setupTLS();
+
+bool isWaitingForConfirmation() {
+  return _waitingForConfirmation;
+}
+
+bool hasReceivedConfirmation() {
+  return _confirmationReceived;
+}
+
+String getConfirmedSSID() {
+  return _confirmedSSID;
+}
+
+void clearConfirmation() {
+  _waitingForConfirmation = false;
+  _confirmationReceived = false;
+  _confirmedSSID = "";
+}
 
 bool begin() {
   MqttBrokerConfig defaultBroker;
@@ -363,16 +386,24 @@ bool publishWiFiCredentials(const String &ssid, const String &password) {
 
   Utils::logMessageF("MQTT", "Sending WiFi credentials for SSID: %s", ssid.c_str());
   
-  bool success = _mqttClient->publish(MQTT_TOPIC_WIFI_CREDENTIALS, payload.c_str());
+  // ✅ Publish credentials (NOT retained)
+  bool success = _mqttClient->publish(MQTT_TOPIC_WIFI_CREDENTIALS, payload.c_str(), false); 
   
   if (success) {
     Utils::logMessage("MQTT", "✓ Credentials sent to OrangePi");
     _stats.messagesPublished++;
 
+    // ✅ Set waiting flag
+    _waitingForConfirmation = true;
+    _confirmationReceived = false;
+    _confirmedSSID = "";
+
+    vTaskDelay(pdMS_TO_TICKS(500)); 
+    _mqttClient->publish(MQTT_TOPIC_WIFI_CREDENTIALS, "", true);  // Empty + retained = clear
+    Utils::logMessage("MQTT", "✓ Credentials topic cleared");
   } else {
     Utils::logMessage("MQTT", "✗ Failed to send credentials");
-    _stats.messagesPublished++;
-
+    _stats.messagesFailed++;
   }
   
   return success;
@@ -531,6 +562,14 @@ static bool _connect() {
     return false;
   }
 
+  // ✅ ADD THIS: Set longer socket timeout
+  if (_insecureClient != nullptr) {
+    _insecureClient->setTimeout(10000);  // 10 seconds instead of 3
+  }
+  if (_secureClient != nullptr) {
+    _secureClient->setTimeout(10000);
+  }
+
   _setState(MQTT_STATE_CONNECTING);
   _stats.connectAttempts++;
   _reconnectAttempts++;
@@ -582,12 +621,11 @@ static bool _connect() {
     Utils::logMessage("MQTT", "ERROR: MQTT client is null before connect");
     return false;
   }
-                       
+
   String clientId = _generateClientId();
   bool connected = false;
 
   if (strlen(_username) > 0 && strlen(_password) > 0) {
-    Utils::logMessageF("MQTT", "inside if");
     connected = _mqttClient->connect(clientId.c_str(), _username, _password);
   } else {
     connected = _mqttClient->connect(clientId.c_str());
@@ -713,16 +751,20 @@ static void _mqttCallback(char *topic, byte *payload, unsigned int length) {
       }
       else if (status == "wifi_configured") {
         Utils::logMessage("MQTT", "✅ OrangePi confirmed WiFi configuration!");
+        String ssid = doc["ssid"].as<String>();  // ✅ Extract SSID from JSON
+        _confirmationReceived = true;
+        _confirmedSSID = ssid;
+        _waitingForConfirmation = false;
         // LedManager::runSuccessSequence();
       }
       else if (status == "connection_failed") {
-        Utils::logMessage("MQTT", "⚠️ OrangePi failed to connect to WiFi");
-        String error = doc["error"].as<String>();
-        if (error.length() > 0) {
-          Utils::logMessageF("MQTT", "Error: %s", error.c_str());
+        Utils::logMessage("MQTT", "❌ OrangePi failed to connect to WiFi");
+          String error = doc["error"].as<String>();
+          if (error.length() > 0) {
+            Utils::logMessageF("MQTT", "Error: %s", error.c_str());
+          }
+          _waitingForConfirmation = false;
         }
-        // LedManager::runErrorSequence();
-      }
       else if (status == "disconnected") {
         Utils::logMessage("MQTT", "🔌 OrangePi: WiFi disconnected");
         // LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_SLOW);

@@ -307,19 +307,35 @@ void loop() {
     return;
   }
 
-  // ✅ Reconnect MQTT if needed
+  // ✅ Reconnect MQTT with retry limit
   if (!MqttManager::isConnected()) {
     static uint32_t lastMqttReconnectAttempt = 0;
-    if (millis() - lastMqttReconnectAttempt > 5000) {
-      Utils::logMessage("MAIN", "MQTT not connected - reconnecting...");
-      MqttManager::reconnect();
-      lastMqttReconnectAttempt = millis();
+    static uint32_t mqttReconnectAttempts = 0;
+    
+    if (millis() - lastMqttReconnectAttempt > 10000) {  // ✅ Try every 10 seconds
+      mqttReconnectAttempts++;
+      
+      if (mqttReconnectAttempts <= 10) {  // ✅ Max 10 attempts
+        Utils::logMessageF("MAIN", "MQTT reconnect attempt %d/10", mqttReconnectAttempts);
+        MqttManager::reconnect();
+        lastMqttReconnectAttempt = millis();
+      } else {
+        // ✅ After 10 failed attempts, wait longer (1 minute)
+        if (millis() - lastMqttReconnectAttempt > 60000) {
+          Utils::logMessage("MAIN", "Retrying MQTT after cooldown...");
+          mqttReconnectAttempts = 0;  // Reset counter
+          lastMqttReconnectAttempt = millis();
+        }
+      }
     }
+    
     Utils::delayTask(1000);
     return;
   }
-
-  // ✅ Both WiFi and MQTT connected - proceed
+  
+  // ✅ Reset reconnect counter when connected
+  static uint32_t mqttReconnectAttempts = 0;
+  mqttReconnectAttempts = 0;
 
   // Process MQTT messages
   MqttManager::loop();
@@ -464,9 +480,11 @@ void enterLightSleep() {
     Utils::delayTask(100);
   }
 
-  WiFi.disconnect(false);
-  // WiFi.mode(WIFI_OFF);
-  Utils::delayTask(100);
+  // ✅ Gracefully disconnect WiFi
+  if (WifiManager::isFullyConnected()) {
+    WiFi.disconnect(false);  // Don't erase credentials
+    delay(500);
+  }
 
   // Disable all wake sources first
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
@@ -532,7 +550,9 @@ void enterLightSleep() {
     return;  // Exit and try again on next wake
   }
 
-Utils::logMessage("MAIN", "✅ WiFi reconnected successfully");
+  Utils::logMessage("MAIN", "✅ WiFi reconnected successfully");
+  delay(3000);  // ✅ Give TCP/IP stack time to stabilize
+
   // Handle portal mode if button was pressed
   if (inPortalMode) {
     Utils::logMessage("MAIN", "Starting portal (button during sleep)");
@@ -541,25 +561,34 @@ Utils::logMessage("MAIN", "✅ WiFi reconnected successfully");
     return;
   }
 
-  // Reconnect MQTT
-  Utils::logMessage("MAIN", "Reconnecting MQTT...");
+  // ===== PHASE 2: RECONNECT MQTT =====
+  Utils::logMessage("MAIN", "📡 Phase 2: Reconnecting MQTT...");
+  
   uint32_t mqttStart = millis();
-  while (!MqttManager::isConnected() && (millis() - mqttStart) < 15000) {
+  const uint32_t MQTT_TIMEOUT = 20000;
+  const uint32_t RETRY_INTERVAL = 3000;
+  uint32_t lastAttempt = 0;
+  int attempts = 0;
+  
+  while (!MqttManager::isConnected() && (millis() - mqttStart) < MQTT_TIMEOUT) {
+    if (millis() - lastAttempt >= RETRY_INTERVAL) {
+      attempts++;
+      Utils::logMessageF("MAIN", "MQTT attempt %d...", attempts);
+      MqttManager::reconnect();
+      lastAttempt = millis();
+    }
+    
     MqttManager::loop();
-    Utils::delayTask(500);
+    delay(100);
     yield();
   }
 
-  // ✅ CHECK if MQTT actually reconnected
   if (!MqttManager::isConnected()) {
     Utils::logMessage("MAIN", "⚠️ MQTT reconnection failed after sleep");
-    BatteryManager::update();
-    return;  // Exit and try again on next wake
+  } else {
+    Utils::logMessage("MAIN", "✅ MQTT reconnected successfully");
   }
 
-  Utils::logMessage("MAIN", "✅ MQTT reconnected successfully");
- 
   BatteryManager::update();
-  
-  Utils::logMessage("MAIN", "Wake-up complete - resuming normal operation");
+  Utils::logMessage("MAIN", "🎉 Wake-up reconnection complete!");
 }

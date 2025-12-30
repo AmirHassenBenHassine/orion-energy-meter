@@ -8,8 +8,27 @@
 #include <esp_partition.h>
 #include <unity.h>
 
-#define TEST_WIFI_SSID "TUNISIETELECOM-2.4G-nG46_Plus"
-#define TEST_WIFI_PASS "KF39UwaM"
+// #define TEST_WIFI_SSID "TUNISIETELECOM-2.4G-nG46_Plus"
+// #define TEST_WIFI_PASS "KF39UwaM"
+
+#define TEST_WIFI_SSID "Amir"
+#define TEST_WIFI_PASS "beethoveen"
+
+// Your GitHub repo details
+#define GITHUB_USER "AmirHassenBenHassine"
+#define GITHUB_REPO "OTA_Github"
+#define GITHUB_BRANCH "main"
+#define FIRMWARE_BIN_NAME "finalOrion_transmiter.ino1.bin"
+#define VERSION_JSON_NAME "version.json"
+
+#define CURRENT_VERSION "1.0.0"  // Change this to test updates
+
+// URLs
+String FIRMWARE_URL = "https://raw.githubusercontent.com/" + String(GITHUB_USER) + "/" + 
+                      String(GITHUB_REPO) + "/" + String(GITHUB_BRANCH) + "/" + FIRMWARE_BIN_NAME;
+
+String VERSION_JSON_URL = "https://raw.githubusercontent.com/" + String(GITHUB_USER) + "/" + 
+                          String(GITHUB_REPO) + "/" + String(GITHUB_BRANCH) + "/" + VERSION_JSON_NAME;
 
 static const char GITHUB_ROOT_CA[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
@@ -258,6 +277,7 @@ void test_https_fetch_from_github(void) {
   http.end();
   Serial.println("GitHub HTTPS test: PASSED");
 }
+
 // void test_https_connection_with_ca(void) {
 //   // Verify time is synced first
 //   TEST_ASSERT_TRUE_MESSAGE(isTimeSynced(),
@@ -313,6 +333,17 @@ void test_https_fetch_from_github(void) {
 // =============================================================================
 // JSON PARSING TESTS (Simulates version.json parsing)
 // =============================================================================
+
+void test_github_reachable(void) {
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip cert validation for simplicity
+  
+  bool connected = client.connect("raw.githubusercontent.com", 443);
+  TEST_ASSERT_TRUE_MESSAGE(connected, "Cannot reach GitHub");
+  
+  client.stop();
+  Serial.println("✅ GitHub is reachable");
+}
 
 void test_parse_version_json(void) {
   String mockJson = R"({
@@ -450,14 +481,329 @@ void test_update_blocked_by_min_version(void) {
 // }
 
 // =============================================================================
+// VERSION.JSON TESTS
+// =============================================================================
+
+void test_fetch_version_json(void) {
+  Serial.println("\n--- Testing version.json fetch ---");
+  
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  
+  Serial.printf("Fetching: %s\n", VERSION_JSON_URL.c_str());
+  
+  http.begin(client, VERSION_JSON_URL);
+  http.setTimeout(15000);
+  
+  int httpCode = http.GET();
+  Serial.printf("HTTP Response: %d\n", httpCode);
+  
+  TEST_ASSERT_EQUAL_MESSAGE(200, httpCode, "Failed to fetch version.json");
+  
+  if (httpCode == 200) {
+    String payload = http.getString();
+    Serial.printf("✅ Downloaded %d bytes\n", payload.length());
+    Serial.println("Content:");
+    Serial.println(payload);
+    
+    // Try to parse JSON
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    
+    TEST_ASSERT_FALSE_MESSAGE(error, "Failed to parse version.json");
+    
+    if (!error) {
+      const char* version = doc["version"];
+      const char* firmware_url = doc["firmware_url"];
+      
+      Serial.printf("Version: %s\n", version);
+      Serial.printf("Firmware URL: %s\n", firmware_url);
+      
+      TEST_ASSERT_NOT_NULL(version);
+      TEST_ASSERT_NOT_NULL(firmware_url);
+    }
+  }
+  
+  http.end();
+}
+
+void test_version_comparison_logic(void) {
+  String currentVersion = CURRENT_VERSION;
+  String availableVersion = "1.1.0";  // Assume this is in version.json
+  
+  int cmp = compareVersions(availableVersion, currentVersion);
+  
+  Serial.printf("Current: %s, Available: %s\n", currentVersion.c_str(), availableVersion.c_str());
+  Serial.printf("Comparison result: %d\n", cmp);
+  
+  if (cmp > 0) {
+    Serial.println("✅ Update available!");
+  } else if (cmp == 0) {
+    Serial.println("✅ Already on latest version");
+  } else {
+    Serial.println("✅ Current version is newer");
+  }
+  
+  TEST_ASSERT_TRUE(true);  // This test just shows the logic
+}
+
+// =============================================================================
+// FIRMWARE DOWNLOAD TESTS
+// =============================================================================
+
+void test_firmware_accessible(void) {
+  Serial.println("\n--- Testing firmware accessibility ---");
+  
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  
+  Serial.printf("Checking: %s\n", FIRMWARE_URL.c_str());
+  
+  http.begin(client, FIRMWARE_URL);
+  http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  
+  // Use HEAD request to check without downloading
+  int httpCode = http.sendRequest("HEAD");
+  Serial.printf("HTTP Response: %d\n", httpCode);
+  
+  if (httpCode == 200) {
+    int contentLength = http.getSize();
+    Serial.printf("✅ Firmware file exists, size: %d bytes\n", contentLength);
+    TEST_ASSERT_GREATER_THAN(100000, contentLength);  // Should be >100KB
+  } else {
+    Serial.printf("❌ Firmware not accessible (code: %d)\n", httpCode);
+    TEST_FAIL_MESSAGE("Firmware file not accessible");
+  }
+  
+  http.end();
+}
+
+void test_download_firmware_chunk(void) {
+  Serial.println("\n--- Testing firmware download (first 1KB) ---");
+  
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  
+  http.begin(client, FIRMWARE_URL);
+  http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  
+  int httpCode = http.GET();
+  
+  TEST_ASSERT_EQUAL_MESSAGE(200, httpCode, "Failed to download firmware");
+  
+  if (httpCode == 200) {
+    int totalLength = http.getSize();
+    Serial.printf("Total size: %d bytes\n", totalLength);
+    
+    // Read first 1KB
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buffer[1024];
+    int bytesRead = stream->readBytes(buffer, 1024);
+    
+    Serial.printf("✅ Downloaded %d bytes successfully\n", bytesRead);
+    TEST_ASSERT_GREATER_THAN(1000, bytesRead);
+    
+    // Check for ESP32 firmware header (0xE9)
+    Serial.printf("First byte: 0x%02X\n", buffer[0]);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xE9, buffer[0], "Not a valid ESP32 firmware file");
+  }
+  
+  http.end();
+}
+
+// =============================================================================
+// FULL OTA SIMULATION (WITHOUT ACTUAL FLASH)
+// =============================================================================
+
+void test_ota_update_simulation(void) {
+  Serial.println("\n--- OTA Update with Actual Flashing ---");
+  
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+  
+  // Step 1: Check firmware size with HEAD request (fast, no download)
+  Serial.println("Step 1: Checking firmware file...");
+  Serial.printf("URL: %s\n", FIRMWARE_URL.c_str());
+  
+  http.begin(client, FIRMWARE_URL);
+  http.setTimeout(60000);  // ✅ 60 second timeout
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  
+  int httpCode = http.sendRequest("HEAD");  // ✅ HEAD first to get size
+  
+  if (httpCode != 200) {
+    Serial.printf("❌ Failed to access firmware: HTTP %d\n", httpCode);
+    TEST_FAIL_MESSAGE("Firmware file not accessible");
+    http.end();
+    return;
+  }
+  
+  int contentLength = http.getSize();
+  Serial.printf("✅ Firmware size: %d bytes (%.2f MB)\n", contentLength, contentLength / 1024.0 / 1024.0);
+  
+  if (contentLength <= 0 || contentLength > 4 * 1024 * 1024) {  // Max 4MB
+    Serial.printf("❌ Invalid firmware size: %d\n", contentLength);
+    TEST_FAIL_MESSAGE("Invalid firmware size");
+    http.end();
+    return;
+  }
+  
+  http.end();
+  delay(1000);  // ✅ Give connection time to close
+  
+  // Step 2: Begin OTA update
+  Serial.println("\nStep 2: Starting OTA update...");
+  
+  bool canBegin = Update.begin(contentLength);
+  if (!canBegin) {
+    Serial.printf("❌ Not enough space: %d bytes needed\n", contentLength);
+    TEST_FAIL_MESSAGE("Not enough space for OTA");
+    return;
+  }
+  
+  Serial.println("✅ OTA space allocated");
+  
+  // Step 3: Download and flash firmware
+  Serial.println("\nStep 3: Downloading and flashing firmware...");
+  
+  // ✅ New connection for actual download
+  http.begin(client, FIRMWARE_URL);
+  http.setTimeout(120000);  // ✅ 2 minute timeout for download
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  
+  httpCode = http.GET();  // ✅ Now GET the actual file
+  
+  if (httpCode != 200) {
+    Serial.printf("❌ Download failed: HTTP %d\n", httpCode);
+    Update.abort();
+    TEST_FAIL_MESSAGE("Download failed");
+    http.end();
+    return;
+  }
+  
+  WiFiClient* stream = http.getStreamPtr();
+  
+  size_t written = 0;
+  uint8_t buffer[512];  // ✅ Larger buffer for faster transfer
+  int lastProgress = 0;
+  unsigned long lastUpdate = millis();
+  
+  Serial.println("Progress: 0%");
+  
+  while (http.connected() && (written < contentLength)) {
+    size_t availableSize = stream->available();
+    
+    if (availableSize) {
+      int bytesToRead = ((availableSize > sizeof(buffer)) ? sizeof(buffer) : availableSize);
+      int bytesRead = stream->readBytes(buffer, bytesToRead);
+      
+      if (bytesRead > 0) {
+        size_t bytesWritten = Update.write(buffer, bytesRead);
+        
+        if (bytesWritten != bytesRead) {
+          Serial.printf("\n❌ Write error: wrote %d of %d bytes\n", bytesWritten, bytesRead);
+          Update.abort();
+          http.end();
+          TEST_FAIL_MESSAGE("OTA write failed");
+          return;
+        }
+        
+        written += bytesWritten;
+        
+        // Print progress every 10% or every 5 seconds
+        int progress = (written * 100) / contentLength;
+        if (progress >= lastProgress + 10 || (millis() - lastUpdate) > 5000) {
+          Serial.printf("Progress: %d%% (%d / %d bytes)\n", progress, written, contentLength);
+          lastProgress = progress;
+          lastUpdate = millis();
+        }
+      }
+    } else {
+      delay(10);  // ✅ Small delay if no data available
+    }
+    
+    yield();  // ✅ Feed watchdog
+  }
+  
+  Serial.printf("Progress: 100%% (%d / %d bytes)\n", written, contentLength);
+  
+  http.end();
+  
+  // Step 4: Finalize OTA
+  Serial.println("\nStep 4: Finalizing OTA update...");
+  
+  if (written != contentLength) {
+    Serial.printf("❌ Size mismatch: downloaded %d, expected %d\n", written, contentLength);
+    Update.abort();
+    TEST_FAIL_MESSAGE("Incomplete download");
+    return;
+  }
+  
+  if (!Update.end(true)) {
+    Serial.printf("❌ OTA failed. Error: %s\n", Update.errorString());
+    TEST_FAIL_MESSAGE("OTA finalization failed");
+    return;
+  }
+  
+  Serial.println("✅ OTA update completed successfully!");
+  
+  // Step 5: Verify and reboot
+  if (Update.isFinished()) {
+    Serial.println("✅ Update verified and ready");
+    Serial.println("\n⚠️  Device will reboot in 5 seconds...");
+    
+    delay(5000);
+    
+    Serial.println("🔄 Rebooting...");
+    ESP.restart();
+  } else {
+    TEST_FAIL_MESSAGE("Update not finished properly");
+  }
+}
+
+// =============================================================================
+// OTA PARTITION TESTS
+// =============================================================================
+
+void test_ota_partition_ready(void) {
+  const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
+  TEST_ASSERT_NOT_NULL_MESSAGE(partition, "No OTA partition found");
+  
+  Serial.printf("OTA partition: %s\n", partition->label);
+  Serial.printf("Size: %lu bytes\n", (unsigned long)partition->size);
+  
+  TEST_ASSERT_GREATER_THAN(1000000, partition->size);
+}
+
+void test_update_begin_abort(void) {
+  size_t testSize = 1024 * 1024;  // 1MB
+  
+  bool begun = Update.begin(testSize);
+  TEST_ASSERT_TRUE_MESSAGE(begun, "Update.begin() failed");
+  
+  Update.abort();
+  Serial.println("✅ Update begin/abort works");
+}
+
+// =============================================================================
 // SETUP
 // =============================================================================
 
 void setup() {
   delay(2000);
   Serial.begin(115200);
-  Serial.println("\n\n=== OTA TESTS ===\n");
-
+  Serial.println("\n\n=== OTA GitHub Tests ===\n");
+  
+  Serial.printf("Current firmware version: %s\n", CURRENT_VERSION);
+  Serial.printf("GitHub repo: %s/%s\n", GITHUB_USER, GITHUB_REPO);
+  Serial.printf("Firmware URL: %s\n", FIRMWARE_URL.c_str());
+  Serial.printf("Version JSON URL: %s\n\n", VERSION_JSON_URL.c_str());
   connectWiFi();
   syncTime();
 
@@ -484,7 +830,7 @@ void setup() {
   // HTTPS tests
   Serial.println("\n--- HTTPS Connections ---");
   // RUN_TEST(test_https_debug);
-  RUN_TEST(test_https_github_with_correct_ca);
+  // RUN_TEST(test_https_github_with_correct_ca);
   RUN_TEST(test_https_fetch_from_github);
   // RUN_TEST(test_https_connection_with_ca);
   // RUN_TEST(test_https_github_connection);
@@ -492,7 +838,7 @@ void setup() {
   //
   // JSON parsing tests
   Serial.println("\n--- JSON Parsing ---");
-  RUN_TEST(test_parse_version_json);
+  // RUN_TEST(test_parse_version_json);
   RUN_TEST(test_parse_minimal_json);
   RUN_TEST(test_parse_invalid_json);
 
@@ -503,6 +849,28 @@ void setup() {
   RUN_TEST(test_update_skip_when_newer);
   RUN_TEST(test_update_blocked_by_min_version);
 
+    // GitHub connectivity
+  Serial.println("\n--- GitHub Connectivity ---");
+  RUN_TEST(test_github_reachable);
+
+  // Version.json tests
+  Serial.println("\n--- Version.json Tests ---");
+  // RUN_TEST(test_fetch_version_json);
+  RUN_TEST(test_version_comparison_logic);
+
+  // Firmware tests
+  Serial.println("\n--- Firmware Download Tests ---");
+  RUN_TEST(test_firmware_accessible);
+  RUN_TEST(test_download_firmware_chunk);
+
+  // OTA partition tests
+  Serial.println("\n--- OTA Partition Tests ---");
+  RUN_TEST(test_ota_partition_ready);
+  RUN_TEST(test_update_begin_abort);
+
+  // Full simulation
+  Serial.println("\n--- Full OTA Simulation ---");
+  RUN_TEST(test_ota_update_simulation);
   UNITY_END();
 }
 

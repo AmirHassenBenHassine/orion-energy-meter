@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -9,10 +10,17 @@
 #define TEST_WIFI_SSID "TUNISIETELECOM-2.4G-nG46_Plus"
 #define TEST_WIFI_PASS "KF39UwaM"
 
-#define TEST_MQTT_HOST "192.168.100.235"
-#define TEST_MQTT_PORT 8883
+#define TEST_MQTT_HOST "orion.local"
+#define TEST_MQTT_PORT 1883
 #define TEST_MQTT_USER "orion_device"
 #define TEST_MQTT_PASS "123456789"
+
+// MQTT Topics
+#define TOPIC_WIFI_CREDENTIALS "orion/wifi_credentials"
+#define TOPIC_PAIRING_STATUS "orion/pairing/status"
+#define TOPIC_ENERGY_METRICS "orion/energy/metrics"
+#define TOPIC_TRIGGER "orion/trigger"
+#define TOPIC_CONFIG "orion/config"
 
 #define USE_INSECURE_TLS true
 
@@ -41,20 +49,25 @@ MCLCePSDCVu1re/NbclHl4pFCGaNLimmqD/qLGi5lHrE5pvVHTqVIVbNBzvZQho5
 -----END CERTIFICATE-----
 )EOF";
 
-WiFiClientSecure secureClient;
-PubSubClient mqtt(secureClient);
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
 
 bool messageReceived = false;
 String receivedTopic = "";
 String receivedPayload = "";
+int messagesReceived = 0;
 
 void mqttCallback(char *topic, byte *payload, unsigned int length) {
+  messagesReceived++;
   messageReceived = true;
   receivedTopic = String(topic);
   receivedPayload = "";
   for (unsigned int i = 0; i < length; i++) {
     receivedPayload += (char)payload[i];
   }
+  
+  Serial.printf("\n📨 Message received on %s:\n", topic);
+  Serial.println(receivedPayload);
 }
 
 void connectWiFi() {
@@ -68,8 +81,34 @@ void connectWiFi() {
     delay(500);
     Serial.print(".");
   }
-  Serial.printf("\nWiFi connected. IP: %s\n",
-                WiFi.localIP().toString().c_str());
+
+  if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("\nWiFi connected. IP: %s\n", WiFi.localIP().toString().c_str());
+      
+      // ✅ Wait for valid IP
+      start = millis();
+      while (WiFi.localIP() == IPAddress(0, 0, 0, 0) && (millis() - start) < 10000) {
+        delay(500);
+      }
+      
+      Serial.printf("Final IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+  }
+
+bool connectMQTT() {
+  mqtt.setServer(TEST_MQTT_HOST, TEST_MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
+  mqtt.setKeepAlive(15);  // ✅ Set keepalive
+
+  String clientId = "esp32_test_" + String(random(0xffff), HEX);
+  
+  if (mqtt.connect(clientId.c_str(), TEST_MQTT_USER, TEST_MQTT_PASS)) {
+    Serial.println("✅ MQTT connected");
+    return true;
+  }
+  
+  Serial.printf("❌ MQTT connection failed, state: %d\n", mqtt.state());
+  return false;
 }
 
 void syncTime() {
@@ -88,10 +127,10 @@ void syncTime() {
 void setupTLS() {
 #if USE_INSECURE_TLS
   Serial.println("Using insecure TLS (local testing)");
-  secureClient.setInsecure();
+  // wifiClient.setInsecure();
 #else
   Serial.println("Using Let's Encrypt CA (production)");
-  secureClient.setCACert(ISRG_ROOT_X1);
+  wifiClient.setCACert(ISRG_ROOT_X1);
 #endif
 }
 
@@ -99,11 +138,15 @@ void setUp(void) {
   messageReceived = false;
   receivedTopic = "";
   receivedPayload = "";
+
+  if (!mqtt.connected()) {
+    connectMQTT();
+  }
 }
 
 void tearDown(void) {
-  mqtt.disconnect();
-  delay(500);
+  // mqtt.disconnect();
+  // delay(500);
 }
 
 // =============================================================================
@@ -136,6 +179,25 @@ void test_auth_fails_with_wrong_password(void) {
   bool connected = mqtt.connect("esp32_wrong", TEST_MQTT_USER, "wrongpass");
 
   TEST_ASSERT_FALSE_MESSAGE(connected, "Should fail with wrong password");
+}
+
+void test_mqtt_connect(void) {
+  mqtt.disconnect();
+  delay(500);
+  
+  bool connected = connectMQTT();
+  TEST_ASSERT_TRUE_MESSAGE(connected, "MQTT connection failed");
+  TEST_ASSERT_TRUE(mqtt.connected());
+}
+
+void test_mqtt_auth_required(void) {
+  mqtt.disconnect();
+  delay(500);
+  
+  mqtt.setServer(TEST_MQTT_HOST, TEST_MQTT_PORT);
+  
+  bool connected = mqtt.connect("esp32_no_auth");
+  TEST_ASSERT_FALSE_MESSAGE(connected, "Should fail without auth");
 }
 
 // PUBLISH TESTS
@@ -197,6 +259,46 @@ void test_publish_multiple_messages(void) {
   TEST_ASSERT_EQUAL(10, successCount);
 }
 
+void test_publish_wifi_credentials(void) {
+  Serial.println("\n--- Testing WiFi Credentials Publish ---");
+  
+  TEST_ASSERT_TRUE_MESSAGE(mqtt.connected(), "MQTT not connected");
+  
+  // Create WiFi credentials JSON
+  JsonDocument doc;
+  doc["ssid"] = "TestNetwork";
+  doc["password"] = "TestPassword123";
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  Serial.printf("Publishing to %s:\n", TOPIC_WIFI_CREDENTIALS);
+  Serial.println(payload);
+  
+  bool published = mqtt.publish(TOPIC_WIFI_CREDENTIALS, payload.c_str(), false);
+  
+  TEST_ASSERT_TRUE_MESSAGE(published, "Failed to publish WiFi credentials");
+  Serial.println("✅ WiFi credentials published");
+}
+
+void test_wifi_credentials_json_format(void) {
+  JsonDocument doc;
+  doc["ssid"] = "TestSSID";
+  doc["password"] = "TestPass";
+  doc["device_id"] = "AABBCCDD";
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  // Verify it's valid JSON
+  JsonDocument verify;
+  DeserializationError error = deserializeJson(verify, payload);
+  
+  TEST_ASSERT_FALSE(error);
+  TEST_ASSERT_EQUAL_STRING("TestSSID", verify["ssid"]);
+  TEST_ASSERT_EQUAL_STRING("TestPass", verify["password"]);
+}
+
 // SUBSCRIBE TESTS
 
 void test_subscribe_and_receive(void) {
@@ -220,6 +322,133 @@ void test_subscribe_and_receive(void) {
   TEST_ASSERT_EQUAL_STRING("orion/trigger", receivedTopic.c_str());
 }
 
+void test_subscribe_pairing_status(void) {
+  Serial.println("\n--- Testing Pairing Status Subscribe ---");
+  
+  TEST_ASSERT_TRUE(mqtt.connected());
+  
+  bool subscribed = mqtt.subscribe(TOPIC_PAIRING_STATUS, 1);
+  TEST_ASSERT_TRUE_MESSAGE(subscribed, "Failed to subscribe to pairing status");
+  
+  mqtt.loop();
+  delay(100);
+  
+  Serial.println("✅ Subscribed to pairing/status");
+}
+
+void test_receive_pairing_status_starting(void) {
+  Serial.println("\n--- Testing Pairing Status: starting ---");
+  
+  mqtt.subscribe(TOPIC_PAIRING_STATUS);
+  
+  JsonDocument doc;
+  doc["status"] = "starting";
+  doc["device_id"] = "F8B3B77FEAF4";
+  doc["timestamp"] = millis();
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  messageReceived = false;
+  mqtt.publish(TOPIC_PAIRING_STATUS, payload.c_str());
+  
+  unsigned long start = millis();
+  while (!messageReceived && (millis() - start) < 3000) {
+    mqtt.loop();
+    delay(10);
+  }
+  
+  TEST_ASSERT_TRUE_MESSAGE(messageReceived, "Did not receive pairing status");
+  TEST_ASSERT_EQUAL_STRING(TOPIC_PAIRING_STATUS, receivedTopic.c_str());
+  
+  // Parse received message
+  JsonDocument received;
+  deserializeJson(received, receivedPayload);
+  TEST_ASSERT_EQUAL_STRING("starting", received["status"]);
+  
+  Serial.println("✅ Received 'starting' status");
+}
+
+void test_pairing_status_workflow(void) {
+  Serial.println("\n--- Testing Full Pairing Workflow ---");
+  
+  mqtt.subscribe(TOPIC_PAIRING_STATUS);
+  
+  const char* statuses[] = {
+    "starting",
+    "ready_to_configure",
+    "configuring",
+    "wifi_configured",
+    "connection_failed",
+    "paired",
+    "failed",
+    "disconnected"
+  };
+  
+  for (int i = 0; i < 5; i++) {
+    JsonDocument doc;
+    doc["status"] = statuses[i];
+    doc["device_id"] = "F8B3B77FEAF4";
+    doc["step"] = i + 1;
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    messageReceived = false;
+    mqtt.publish(TOPIC_PAIRING_STATUS, payload.c_str());
+    
+    unsigned long start = millis();
+    while (!messageReceived && (millis() - start) < 2000) {
+      mqtt.loop();
+      delay(10);
+    }
+    
+    if (messageReceived) {
+      JsonDocument received;
+      deserializeJson(received, receivedPayload);
+      Serial.printf("✅ Step %d: %s\n", i+1, statuses[i]);
+    }
+    
+    delay(200);
+  }
+  
+  TEST_ASSERT_EQUAL(5, messagesReceived);
+  Serial.println("✅ Full pairing workflow completed");
+}
+
+void test_pairing_status_error_handling(void) {
+  Serial.println("\n--- Testing Pairing Status: Errors ---");
+  
+  mqtt.subscribe(TOPIC_PAIRING_STATUS);
+  
+  // Test connection_failed status
+  JsonDocument doc;
+  doc["status"] = "connection_failed";
+  doc["error"] = "Incorrect password";
+  doc["ssid"] = "TestNetwork";
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  messageReceived = false;
+  mqtt.publish(TOPIC_PAIRING_STATUS, payload.c_str());
+  
+  unsigned long start = millis();
+  while (!messageReceived && (millis() - start) < 2000) {
+    mqtt.loop();
+    delay(10);
+  }
+  
+  TEST_ASSERT_TRUE(messageReceived);
+  
+  JsonDocument received;
+  deserializeJson(received, receivedPayload);
+  TEST_ASSERT_EQUAL_STRING("connection_failed", received["status"]);
+  TEST_ASSERT_EQUAL_STRING("Incorrect password", received["error"]);
+  
+  Serial.println("✅ Error status received correctly");
+}
+
 // RECONNECTION TESTS
 
 void test_reconnect_after_disconnect(void) {
@@ -237,6 +466,122 @@ void test_reconnect_after_disconnect(void) {
   TEST_ASSERT_TRUE(connected);
 }
 
+void test_complete_wifi_pairing_workflow(void) {
+  Serial.println("\n--- Testing Complete WiFi Pairing Workflow ---");
+  
+  // Step 1: ESP32 publishes WiFi credentials
+  Serial.println("Step 1: ESP32 sends WiFi credentials...");
+  JsonDocument credDoc;
+  credDoc["ssid"] = "HomeNetwork";
+  credDoc["password"] = "SecurePass123";
+  credDoc["device_id"] = "F8B3B77FEAF4";
+  
+  String credPayload;
+  serializeJson(credDoc, credPayload);
+  
+  bool credSent = mqtt.publish(TOPIC_WIFI_CREDENTIALS, credPayload.c_str());
+  TEST_ASSERT_TRUE(credSent);
+  Serial.println("✅ Credentials sent");
+  
+  mqtt.loop();
+  delay(500);
+  
+  // Step 2: Subscribe to pairing status
+  Serial.println("Step 2: Subscribing to pairing status...");
+  mqtt.subscribe(TOPIC_PAIRING_STATUS);
+  mqtt.loop();
+  delay(100);
+  
+  // Step 3: Simulate OrangePi responses
+  Serial.println("Step 3: Simulating OrangePi status updates...");
+  
+  const char* workflow[] = {
+    "starting",
+    "ready_to_configure",
+    "configuring",
+    "wifi_configured",
+    "paired"
+  };
+  
+  messagesReceived = 0;
+  
+  for (const char* status : workflow) {
+    JsonDocument statusDoc;
+    statusDoc["status"] = status;
+    statusDoc["device_id"] = "F8B3B77FEAF4";
+    statusDoc["ssid"] = "HomeNetwork";
+    
+    String statusPayload;
+    serializeJson(statusDoc, statusPayload);
+    
+    mqtt.publish(TOPIC_PAIRING_STATUS, statusPayload.c_str());
+    
+    unsigned long start = millis();
+    while ((millis() - start) < 500) {
+      mqtt.loop();
+      delay(10);
+    }
+    
+    Serial.printf("  Status: %s\n", status);
+  }
+  
+  Serial.println("✅ Complete pairing workflow tested");
+  TEST_ASSERT_GREATER_OR_EQUAL(3, messagesReceived);
+}
+
+// =============================================================================
+// ADDITIONAL TOPIC TESTS
+// =============================================================================
+
+void test_publish_energy_metrics(void) {
+  Serial.println("\n--- Testing Energy Metrics Publish ---");
+  
+  JsonDocument doc;
+  doc["deviceId"] = "F8B3B77FEAF4";
+  doc["voltage"] = 230.5;
+  doc["totalPower"] = 1250.8;
+  doc["battery"] = 85.5;
+  
+  JsonArray phases = doc["phases"].to<JsonArray>();
+  for (int i = 0; i < 3; i++) {
+    JsonObject phase = phases.add<JsonObject>();
+    phase["current"] = 2.5 + i * 0.5;
+    phase["power"] = 575.0 + i * 100;
+  }
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  bool published = mqtt.publish(TOPIC_ENERGY_METRICS, payload.c_str());
+  TEST_ASSERT_TRUE(published);
+  
+  Serial.println("✅ Energy metrics published");
+}
+
+void test_subscribe_trigger(void) {
+  Serial.println("\n--- Testing Trigger Subscribe ---");
+  
+  mqtt.subscribe(TOPIC_TRIGGER);
+  
+  JsonDocument doc;
+  doc["action"] = "reboot";
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  messageReceived = false;
+  mqtt.publish(TOPIC_TRIGGER, payload.c_str());
+  
+  unsigned long start = millis();
+  while (!messageReceived && (millis() - start) < 2000) {
+    mqtt.loop();
+    delay(10);
+  }
+  
+  TEST_ASSERT_TRUE(messageReceived);
+  Serial.println("✅ Trigger message received");
+}
+
 // SETUP AND LOOP
 
 void setup() {
@@ -245,6 +590,7 @@ void setup() {
   Serial.println("\n\n=== MQTT TLS TESTS ===\n");
 
   connectWiFi();
+  connectMQTT();
   syncTime();
 
   UNITY_BEGIN();
@@ -261,6 +607,30 @@ void setup() {
 
   RUN_TEST(test_reconnect_after_disconnect);
 
+  Serial.println("\n--- Connection Tests ---");
+  RUN_TEST(test_mqtt_connect);
+  RUN_TEST(test_mqtt_auth_required);
+
+  Serial.println("\n--- WiFi Credentials Tests ---");
+  RUN_TEST(test_wifi_credentials_json_format);
+  RUN_TEST(test_publish_wifi_credentials);
+
+  Serial.println("\n--- Pairing Status Tests ---");
+  RUN_TEST(test_subscribe_pairing_status);
+  RUN_TEST(test_receive_pairing_status_starting);
+  RUN_TEST(test_pairing_status_workflow);
+  RUN_TEST(test_pairing_status_error_handling);
+
+  Serial.println("\n--- Complete Workflow ---");
+  RUN_TEST(test_complete_wifi_pairing_workflow);
+
+  Serial.println("\n--- Additional Topics ---");
+  RUN_TEST(test_publish_energy_metrics);
+  RUN_TEST(test_subscribe_trigger);
+
+  UNITY_END();
+  
+  mqtt.disconnect();
   UNITY_END();
 }
 
