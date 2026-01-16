@@ -19,6 +19,8 @@ static volatile WifiState _currentState = WIFI_STATE_DISCONNECTED;
 static volatile bool _taskShouldRun = false;
 static volatile bool _eventsEnabled = false;
 static volatile bool _forcePortalOnStart = false;
+static volatile bool _freshCredentialsFlag = false;
+static volatile bool _isInPairingMode = false;
 
 // Connection tracking
 static uint64_t _lastConnectedMillis = 0;
@@ -115,6 +117,10 @@ bool isFullyConnected() {
 bool isAPMode() {
   return _currentState == WIFI_STATE_AP_MODE ||
          _currentState == WIFI_STATE_PORTAL_ACTIVE;
+}
+
+bool isInPairingMode() {
+  return _isInPairingMode;
 }
 
 WifiState getState() { return _currentState; }
@@ -369,10 +375,13 @@ static void _setupWiFiManager(::WiFiManager &wm) {
   wm.setAPCallback([](::WiFiManager *wm) {
     Utils::logMessage("WIFI", "Captive portal started");
     _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
+    _freshCredentialsFlag = false;  // ✅ Reset when portal starts
+
   });
 
   wm.setSaveConfigCallback([]() {
     Utils::logMessage("WIFI", "Configuration saved");
+    _freshCredentialsFlag = true;  // ✅ SET THE FLAG HERE
     // LedManager::runSuccessSequence();
     // Utils::delayTask(500);
     // ESP.restart();
@@ -452,7 +461,6 @@ static void _wifiTask(void *parameter) {
 
   _notifyStateChange(WIFI_STATE_CONNECTING);
 
-  bool portalMode = false;
   bool initialConnectionDone = false;
   bool portalTriggeredByButton = false;
   String previousSSID = "";
@@ -485,7 +493,7 @@ static void _wifiTask(void *parameter) {
     WiFi.softAP(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
 
     _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-    portalMode = true;
+    _isInPairingMode  = true;
     portalTriggeredByButton = false;
     
     // ✅ Start portal without trying to connect
@@ -517,7 +525,7 @@ static void _wifiTask(void *parameter) {
       WiFi.softAP(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
       
       _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-      portalMode = true;
+      _isInPairingMode  = true;
       
       wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
       Utils::logMessage("WIFI", "Portal started - ready for pairing");
@@ -535,8 +543,9 @@ static void _wifiTask(void *parameter) {
       } else {
         Utils::logMessage("WIFI", "Auto-connect failed, entering portal mode");
         WiFi.mode(WIFI_AP_STA);
-        portalMode = true;
+        _isInPairingMode  = true;
         portalTriggeredByButton = false;
+        _reconnectAttempts = 0;  // ✅ Reset counter
         wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
       }
     }
@@ -549,8 +558,19 @@ static void _wifiTask(void *parameter) {
   while (_taskShouldRun) {
     yield();
     vTaskDelay(pdMS_TO_TICKS(10));
-    
-    if (portalMode && wm != nullptr) {
+
+    if (_isInPairingMode  && wm != nullptr) {
+        static uint32_t portalStartedAt = 0;
+        if (portalStartedAt == 0) {
+          portalStartedAt = millis();
+        }
+        
+        const uint32_t MAX_PORTAL_DURATION = 300000; // 5 minutes
+        if (millis() - portalStartedAt > MAX_PORTAL_DURATION) {
+          Utils::logMessage("WIFI", "⏱ Portal max duration reached - restarting");
+          ESP.restart();
+        }
+
       WiFi.mode(WIFI_AP_STA); 
       wm->process();
       yield();
@@ -562,43 +582,141 @@ static void _wifiTask(void *parameter) {
         vTaskDelay(pdMS_TO_TICKS(100));
       }
 
-      // ✅ Check if user submitted credentials (but NOT connected yet)
-      String submittedSSID = wm->getWiFiSSID();
-      String submittedPass = wm->getWiFiPass();
-      
-      if (portalMode && 
-          submittedSSID.length() > 0 && 
-          !credentialsReceived && 
-          submittedSSID != previousSSID) { 
-            
+      if (_freshCredentialsFlag && !credentialsReceived) {
+        String submittedSSID = wm->getWiFiSSID();
+        String submittedPass = wm->getWiFiPass();
+        
         Utils::logMessage("WIFI", "✅ User submitted credentials");
         Utils::logMessageF("WIFI", "SSID: %s", submittedSSID.c_str());
         
         newSSID = submittedSSID;
         newPassword = submittedPass;
         credentialsReceived = true;
+        _freshCredentialsFlag = false;
         
-        _eventsEnabled = false;
+        // ========== PHASE 1: VALIDATE CREDENTIALS (ESP32 CONNECTS) ==========
+        Utils::logMessage("WIFI", "🔍 Validating credentials...");
+        LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_FAST);
+        
+        // Stay in AP_STA mode so we keep the AP running
         WiFi.mode(WIFI_AP_STA);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500));
         
-        // ✅ DECLARE ALL VARIABLES AT THE TOP
-        uint32_t CREDENTIAL_WINDOW = 120000;
-        uint32_t windowStart = millis();
-        bool credentialsFetched = false;
-        uint32_t connectStart;
-        uint32_t revertStart;
-
-        // ✅ START SIMPLE HTTP SERVER
+        // Disable events temporarily to avoid interference
+        _eventsEnabled = false;
+        
+        // Try to connect to the new WiFi
+        WiFi.begin(newSSID.c_str(), newPassword.c_str());
+        
+        uint32_t connectStart = millis();
+        uint32_t VALIDATION_TIMEOUT = 20000; // 20 seconds
+        bool validationSuccess = false;
+        String failureReason = "";
+        
+        while ((millis() - connectStart) < VALIDATION_TIMEOUT) {
+          wl_status_t status = WiFi.status();
+          
+          if (status == WL_CONNECTED) {
+            // ✅ Connection successful!
+            validationSuccess = true;
+            Utils::logMessage("WIFI", "✅ Credentials validated!");
+            LedManager::runSuccessSequence();
+            break;
+          }
+          else if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
+            // ❌ Connection failed
+            if (status == WL_NO_SSID_AVAIL) {
+              failureReason = "Network not found";
+              Utils::logMessage("WIFI", "❌ Network not found");
+            } else {
+              failureReason = "Connection failed";
+              Utils::logMessage("WIFI", "❌ Connection failed");
+            }
+            break;
+          }
+          
+          vTaskDelay(pdMS_TO_TICKS(500));
+          yield();
+        }
+        
+        // Timeout check
+        if (!validationSuccess && failureReason.length() == 0) {
+          if (WiFi.status() != WL_CONNECTED) {
+            failureReason = "Connection timeout (wrong password?)";
+            Utils::logMessage("WIFI", "❌ Validation timeout");
+          }
+        }
+        
+        _eventsEnabled = true;
+        
+        // ========== PHASE 2A: IF VALIDATION FAILED ==========
+        if (!validationSuccess) {
+          Utils::logMessageF("WIFI", "Validation failed: %s", failureReason.c_str());
+          LedManager::runErrorSequence();
+          
+          // Disconnect from the failed network
+          WiFi.disconnect(false, false);
+          vTaskDelay(pdMS_TO_TICKS(500));
+          
+          // Make sure AP is still running
+          WiFi.mode(WIFI_AP_STA);
+          vTaskDelay(pdMS_TO_TICKS(500));
+          
+          // Show error message on LCD or via portal
+          // (You could implement a status endpoint for the portal to poll)
+          
+          Utils::logMessage("WIFI", "❌ Invalid credentials - staying in portal mode");
+          
+          // Reset flag to allow retry
+          credentialsReceived = false;
+          continue; // Stay in portal mode
+        }
+        
+        // ========== PHASE 2B: VALIDATION SUCCESSFUL - SEND TO ORANGEPI ==========
+        Utils::logMessage("WIFI", "📡 Sending validated credentials to OrangePi...");
+        
+        // Wait for OrangePi to connect to our AP (if not already connected)
+        uint32_t waitForOrangePi = millis();
+        uint32_t WAIT_TIMEOUT = 30000; // 30 seconds
+        bool orangePiReady = false;
+        
+        while ((millis() - waitForOrangePi) < WAIT_TIMEOUT) {
+          // Check if any station is connected to our AP
+          if (WiFi.softAPgetStationNum() > 0) {
+            orangePiReady = true;
+            Utils::logMessageF("WIFI", "OrangePi connected (%d clients)", WiFi.softAPgetStationNum());
+            break;
+          }
+          
+          if ((millis() - waitForOrangePi) % 5000 < 200) {
+            Utils::logMessageF("WIFI", "Waiting for OrangePi... %d/%d clients", 
+                              WiFi.softAPgetStationNum(), WAIT_TIMEOUT/1000);
+          }
+          
+          vTaskDelay(pdMS_TO_TICKS(500));
+          yield();
+        }
+        
+        if (!orangePiReady) {
+          Utils::logMessage("WIFI", "⏱ OrangePi didn't connect to AP");
+          // You can decide: restart or continue anyway
+          // For now, let's continue since ESP32 is already connected
+        }
+        
+        // ========== PHASE 3: SERVE CREDENTIALS VIA HTTP ==========
         WiFiServer credServer(8080);
         credServer.begin();
         Utils::logMessage("WIFI", "📡 Credential server started on 192.168.4.1:8080");
         
-        while ((millis() - windowStart) < CREDENTIAL_WINDOW && !credentialsFetched) {
+        uint32_t serveStart = millis();
+        uint32_t SERVE_TIMEOUT = 60000; // 60 seconds
+        bool credentialsSent = false;
+        
+        while ((millis() - serveStart) < SERVE_TIMEOUT && !credentialsSent) {
           WiFiClient client = credServer.available();
           
           if (client) {
-            Utils::logMessage("WIFI", "📥 HTTP request received");
+            Utils::logMessage("WIFI", "📥 HTTP request from OrangePi");
             
             String request = "";
             while (client.connected() && client.available()) {
@@ -607,19 +725,17 @@ static void _wifiTask(void *parameter) {
               if (request.endsWith("\r\n\r\n")) break;
             }
             
-            // Check if GET /credentials
             if (request.indexOf("GET /credentials") >= 0) {
-              Utils::logMessage("WIFI", "✅ Serving credentials to OrangePi");
+              Utils::logMessage("WIFI", "✅ Serving validated credentials");
               
-              // Build JSON response
               JsonDocument doc;
               doc["ssid"] = newSSID;
               doc["password"] = newPassword;
+              doc["validated"] = true;  // ✅ Flag that these are pre-validated
               
               String payload;
               serializeJson(doc, payload);
               
-              // Send HTTP response
               client.println("HTTP/1.1 200 OK");
               client.println("Content-Type: application/json");
               client.println("Access-Control-Allow-Origin: *");
@@ -629,19 +745,16 @@ static void _wifiTask(void *parameter) {
               client.println();
               client.println(payload);
               
-              credentialsFetched = true;
+              credentialsSent = true;
               Utils::logMessage("WIFI", "✅ Credentials sent to OrangePi!");
-              LedManager::runSuccessSequence();
             }
             
             client.stop();
           }
           
-          // Log progress
-          if ((millis() - windowStart) % 10000 < 200) {
-            uint32_t elapsed = (millis() - windowStart) / 1000;
-            Utils::logMessageF("WIFI", "Waiting... %d/120 seconds (clients=%d)", 
-                              elapsed, WiFi.softAPgetStationNum());
+          if ((millis() - serveStart) % 10000 < 200) {
+            uint32_t elapsed = (millis() - serveStart) / 1000;
+            Utils::logMessageF("WIFI", "Waiting for OrangePi to fetch... %d/60s", elapsed);
           }
           
           vTaskDelay(pdMS_TO_TICKS(100));
@@ -650,106 +763,83 @@ static void _wifiTask(void *parameter) {
         
         credServer.stop();
         
-        if (credentialsFetched) {
-          Utils::logMessage("WIFI", "🎉 OrangePi fetched credentials!");
-          vTaskDelay(pdMS_TO_TICKS(5000)); // Wait for OrangePi to connect
-        } else {
-          Utils::logMessage("WIFI", "⏱ Timeout - OrangePi didn't fetch");
+        if (!credentialsSent) {
+          Utils::logMessage("WIFI", "⏱ OrangePi didn't fetch credentials");
+          // ESP32 is already connected, so we can continue anyway
         }
         
-        // ========== PHASE 3: CONNECT ESP32 TO WIFI ==========
-        Utils::logMessage("WIFI", "📶 Phase 3: Connecting ESP32 to WiFi...");
+        // ========== PHASE 4: CLEANUP AND FINALIZE ==========
+        Utils::logMessage("WIFI", "🎉 Switching to STA mode...");
         
         // Clean up portal
-        portalMode = false;
-        delete wm;
-        wm = nullptr;
+        _isInPairingMode  = false;           // Exit portal mode
+        credentialsReceived = false;  // Reset for next time
+        initialConnectionDone = true; // Mark as successfully connected
+
+        // Clean up portal
+        if (wm != nullptr) {
+          delete wm;
+          wm = nullptr;
+        }
         
+        // Disconnect AP
         WiFi.softAPdisconnect(true);
         vTaskDelay(pdMS_TO_TICKS(500));
         
+        // Switch to pure STA mode (we're already connected from validation)
         WiFi.mode(WIFI_STA);
         vTaskDelay(pdMS_TO_TICKS(500));
         
-        _eventsEnabled = true;
+        // Save credentials
+        Utils::logMessage("WIFI", "💾 Saving credentials...");
+        WiFi.persistent(true);
         
-        // Connect
+        Preferences prefs;
+        if (prefs.begin(PREF_NAMESPACE_WIFI, false)) {
+          prefs.putString("ssid0", newSSID);
+          prefs.putString("pass0", newPassword);
+          prefs.putInt("count", 1);
+          prefs.end();
+          Utils::logMessage("WIFI", "✅ Credentials saved");
+        }
+        
+        // Verify we're still connected (we should be)
         if (WiFi.status() == WL_CONNECTED) {
-          Utils::logMessage("WIFI", "✅ Already connected!");
+          Utils::logMessage("WIFI", "✅ ESP32 connected!");
           Utils::logMessageF("WIFI", "IP: %s", WiFi.localIP().toString().c_str());
+          
+          _lastConnectedMillis = Utils::millis64();
+          _handleSuccessfulConnection();
+          initialConnectionDone = true;
+          credentialsReceived = false;
+          
+          Utils::logMessage("WIFI", "🎉 Pairing complete!");
+          continue;
         } else {
-          Utils::logMessage("WIFI", "Connecting...");
+          Utils::logMessage("WIFI", "⚠️ Lost connection during mode switch");
+          // Reconnect
           WiFi.begin(newSSID.c_str(), newPassword.c_str());
           
-          connectStart = millis();
-          while (WiFi.status() != WL_CONNECTED && (millis() - connectStart) < 30000) {
+          uint32_t reconnectStart = millis();
+          while (WiFi.status() != WL_CONNECTED && (millis() - reconnectStart) < 20000) {
             vTaskDelay(pdMS_TO_TICKS(500));
             yield();
           }
           
           if (WiFi.status() == WL_CONNECTED) {
-            Utils::logMessage("WIFI", "✅ Connected to WiFi!");
-            Utils::logMessageF("WIFI", "IP: %s", WiFi.localIP().toString().c_str());
-            
-            // ✅ CRITICAL: Save credentials to NVS
-            Utils::logMessage("WIFI", "💾 Saving credentials to NVS...");
-            
-            // Save using WiFi's internal storage
-            WiFi.persistent(true);
-            
-            // Also save to Preferences
-            Preferences prefs;
-            if (prefs.begin(PREF_NAMESPACE_WIFI, false)) {
-              prefs.putString("ssid0", newSSID);
-              prefs.putString("pass0", newPassword);
-              prefs.putInt("count", 1);
-              prefs.end();
-              Utils::logMessage("WIFI", "✅ Credentials saved successfully");
-            } else {
-              Utils::logMessage("WIFI", "❌ Failed to save credentials");
-            }
-            
+            Utils::logMessage("WIFI", "✅ Reconnected successfully");
+            _lastConnectedMillis = Utils::millis64();
+            _handleSuccessfulConnection();
+            initialConnectionDone = true;
+            credentialsReceived = false;
+            continue;
           } else {
-            Utils::logMessage("WIFI", "❌ Failed to connect");
-            
-            // Revert or restart portal
-            if (portalTriggeredByButton && previousSSID.length() > 0) {
-              Utils::logMessage("WIFI", "Reverting to previous WiFi...");
-              WiFi.begin(previousSSID.c_str(), previousPassword.c_str());
-              
-              revertStart = millis();
-              while (WiFi.status() != WL_CONNECTED && (millis() - revertStart) < 20000) {
-                vTaskDelay(pdMS_TO_TICKS(500));
-                yield();
-              }
-              
-              if (WiFi.status() == WL_CONNECTED) {
-                Utils::logMessage("WIFI", "✅ Reverted successfully");
-                _lastConnectedMillis = Utils::millis64();
-                _handleSuccessfulConnection();
-                initialConnectionDone = true;
-                credentialsReceived = false;
-                portalTriggeredByButton = false;
-                continue;
-              }
-            }
-            
+            Utils::logMessage("WIFI", "❌ Failed to reconnect");
             ESP.restart();
           }
         }
-        
-        // Finalize
-        _lastConnectedMillis = Utils::millis64();
-        _handleSuccessfulConnection();
-        initialConnectionDone = true;
-        credentialsReceived = false;
-        portalMode = false;
-        portalTriggeredByButton = false;
-        portalStartTime = 0;
-        
-        Utils::logMessage("WIFI", "🎉 Pairing complete!");
       }
-            
+                  
       // ✅ Timeout handling for button portal
       if (portalTriggeredByButton && previousSSID.length() > 0) {
         if (portalStartTime == 0) {
@@ -763,7 +853,7 @@ static void _wifiTask(void *parameter) {
           
           delete wm;
           wm = nullptr;
-          portalMode = false;
+          _isInPairingMode  = false;
           
           WiFi.mode(WIFI_STA);
           WiFi.begin(previousSSID.c_str(), previousPassword.c_str());
@@ -784,7 +874,7 @@ static void _wifiTask(void *parameter) {
           portalTriggeredByButton = false;
         }
       }
-      }  // ✅ CLOSE the if (portalMode && wm != nullptr)
+      } 
 
     // Notification handling
     if (xTaskNotifyWait(0, ULONG_MAX, &notification, pdMS_TO_TICKS(100))) {
@@ -811,12 +901,26 @@ static void _wifiTask(void *parameter) {
         Utils::logMessage("WIFI", "WiFi disconnected");
         _lastConnectedMillis = 0;
         _notifyStateChange(WIFI_STATE_DISCONNECTED);
-        vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));
-        
+
+        // ✅ Don't process disconnect events if already in portal mode
+        if (_isInPairingMode ) {
+            break;
+        }
+    
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));        
+
         if (!isFullyConnected()) {
           _reconnectAttempts++;
           if (_reconnectAttempts >= WIFI_MAX_RECONNECT_ATTEMPTS) {
             Utils::logMessage("WIFI", "Max reconnects - starting portal");
+
+            // ✅ STOP trying to connect
+            WiFi.disconnect(true);  // true = erase stored credentials from this session
+            vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // ✅ Reset counter to prevent re-triggering
+            _reconnectAttempts = 0;
+
             if (wm == nullptr) {
               wm = new ::WiFiManager();
               _setupWiFiManager(*wm);
@@ -824,9 +928,11 @@ static void _wifiTask(void *parameter) {
             if (wm) {
               WiFi.mode(WIFI_AP_STA);  // ✅ AP_STA mode
               _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-              portalMode = true;
+              _isInPairingMode  = true;
               credentialsReceived = false;
               wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
+              Utils::logMessage("WIFI", "Portal started after failed reconnects");
+
             }
           }
         }
@@ -849,7 +955,7 @@ static void _wifiTask(void *parameter) {
         if (wm) {
           WiFi.mode(WIFI_AP_STA);  // ✅ AP_STA mode
           _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-          portalMode = true;
+          _isInPairingMode  = true;
           credentialsReceived = false;
           wm->startConfigPortal(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
         }
@@ -879,7 +985,7 @@ static void _wifiTask(void *parameter) {
           WiFi.softAP(portalName.c_str(), WIFI_CONFIG_PORTAL_PASSWORD);
           
           _notifyStateChange(WIFI_STATE_PORTAL_ACTIVE);
-          portalMode = true;
+          _isInPairingMode  = true;
           portalTriggeredByButton = true;
           portalStartTime = 0;
           credentialsReceived = false;

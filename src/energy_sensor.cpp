@@ -41,8 +41,8 @@ String EnergyMetrics::toJson() const {
   StaticJsonDocument<512> doc;
 
   doc["deviceId"] = deviceId;
-  doc["battery"] = battery;
   doc["timestamp"] = timestamp;
+  doc["battery"] = battery;
   doc["voltage"] = voltage;
   doc["totalPower"] = totalPower;
   doc["energyTotal"] = energyTotal;

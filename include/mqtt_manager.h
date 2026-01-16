@@ -157,6 +157,8 @@ void setCredentials(const char *username, const char *password);
  */
 void setBroker(const char *host, uint16_t port);
 
+void setAutoReconnect(bool enabled);
+
 /**
  * Publish energy metrics
  * @param metrics Energy metrics to publish

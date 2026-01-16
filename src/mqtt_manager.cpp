@@ -25,6 +25,7 @@ static PubSubClient *_mqttClient = nullptr;
 static MqttBrokerConfig _brokerConfig;
 static MqttSecurityConfig _securityConfig;
 static bool _configuredSecurity = false;
+static bool _autoReconnectEnabled = true;
 
 // Runtime credentials
 static char _username[64] = {0};
@@ -78,6 +79,15 @@ bool hasReceivedConfirmation() {
 
 String getConfirmedSSID() {
   return _confirmedSSID;
+}
+
+void setAutoReconnect(bool enabled) {
+  _autoReconnectEnabled = enabled;
+  if (!enabled) {
+    // Reset reconnection tracking when disabling
+    _reconnectAttempts = 0;
+    _lastReconnectAttempt = 0;
+  }
 }
 
 void clearConfirmation() {
@@ -235,16 +245,18 @@ void loop() {
       _setState(MQTT_STATE_DISCONNECTED);
       _stats.disconnects++;
     }
-
-    uint64_t now = Utils::millis64();
-    uint32_t backoffDelay =
-        MQTT_RECONNECT_DELAY_MS * min(_reconnectAttempts + 1, (uint32_t)5);
+    // ✅ Only auto-reconnect if enabled
+    if (_autoReconnectEnabled) {
+      uint64_t now = Utils::millis64();
+      uint32_t backoffDelay =
+      MQTT_RECONNECT_DELAY_MS * min(_reconnectAttempts + 1, (uint32_t)5);
 
     if (now - _lastReconnectAttempt > backoffDelay) {
       _lastReconnectAttempt = now;
       _connect();
     }
-  } else {
+  }
+ } else {
     _mqttClient->loop();
 
     if (_reconnectAttempts > 0) {

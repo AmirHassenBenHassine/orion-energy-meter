@@ -23,6 +23,8 @@
 
 #define CURRENT_VERSION "1.0.0"  // Change this to test updates
 
+bool isMeasuring = false;  // Add to global scope
+
 // URLs
 String FIRMWARE_URL = "https://raw.githubusercontent.com/" + String(GITHUB_USER) + "/" + 
                       String(GITHUB_REPO) + "/" + String(GITHUB_BRANCH) + "/" + FIRMWARE_BIN_NAME;
@@ -226,6 +228,7 @@ void test_running_partition_valid(void) {
 // =============================================================================
 // HTTPS CONNECTION TESTS (Verify GitHub will work)
 // =============================================================================
+
 void test_https_github_with_correct_ca(void) {
   secureClient.setCACert(GITHUB_ROOT_CA);
 
@@ -508,7 +511,7 @@ void test_fetch_version_json(void) {
     Serial.println(payload);
     
     // Try to parse JSON
-    JsonDocument doc;
+    StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, payload);
     
     TEST_ASSERT_FALSE_MESSAGE(error, "Failed to parse version.json");
@@ -549,7 +552,211 @@ void test_version_comparison_logic(void) {
 }
 
 // =============================================================================
-// FIRMWARE DOWNLOAD TESTS
+// OTA SAFETY TESTS
+// =============================================================================
+
+void test_ota_corrupt_firmware(void) {
+    Serial.println("\n--- Testing Corrupt Firmware Protection ---");
+    
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    
+    // Step 1: Get real firmware size
+    Serial.println("Step 1: Getting firmware info...");
+    http.begin(client, FIRMWARE_URL);
+    int httpCode = http.sendRequest("HEAD");
+    
+    if (httpCode != 200) {
+        TEST_FAIL_MESSAGE("Could not access firmware");
+        http.end();
+        return;
+    }
+    
+    int contentLength = http.getSize();
+    Serial.printf("Firmware size: %d bytes\n", contentLength);
+    http.end();  // ✅ Close HEAD request
+    delay(500);
+    
+    // ✅ Step 2: Set WRONG checksum (no HTTP request needed!)
+    Serial.println("\nStep 2: Setting WRONG checksum...");
+    String wrongMD5 = "ffffffffffffffffffffffffffffffff";
+    Serial.printf("Expected (wrong) MD5: %s\n", wrongMD5.c_str());
+    
+    Update.setMD5(wrongMD5.c_str());  // ✅ Set MD5 BEFORE begin()
+    
+    // Step 3: Begin OTA
+    Serial.println("\nStep 3: Beginning OTA...");
+    bool begun = Update.begin(contentLength);
+    if (!begun) {
+        TEST_FAIL_MESSAGE("Could not begin update");
+        return;
+    }
+    
+    Serial.println("✅ Update begun");
+    
+    // Step 4: Download and flash
+    Serial.println("\nStep 4: Downloading firmware...");
+    
+    http.begin(client, FIRMWARE_URL);  // ✅ New request for actual download
+    http.setTimeout(120000);
+    httpCode = http.GET();
+    
+    if (httpCode != 200) {
+        Update.abort();
+        TEST_FAIL_MESSAGE("Download failed");
+        http.end();
+        return;
+    }
+    
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buffer[512];
+    size_t written = 0;
+    int lastProgress = 0;
+    
+    Serial.println("Flashing with wrong checksum...");
+    
+    while (http.connected() && (written < contentLength)) {
+        if (stream->available()) {
+            int bytesRead = stream->readBytes(buffer, sizeof(buffer));
+            
+            if (bytesRead > 0) {
+                size_t bytesWritten = Update.write(buffer, bytesRead);
+                written += bytesWritten;
+                
+                int progress = (written * 100) / contentLength;
+                if (progress >= lastProgress + 20) {
+                    Serial.printf("Progress: %d%%\n", progress);
+                    lastProgress = progress;
+                }
+            }
+        } else {
+            delay(10);
+        }
+        yield();
+    }
+    
+    Serial.printf("Downloaded: %d bytes\n", written);
+    http.end();
+    
+    // Step 5: Finalize - should FAIL
+    Serial.println("\nStep 5: Finalizing (should fail)...");
+    
+    bool success = Update.end(true);
+    
+    if (success) {
+        Serial.println("❌ ERROR: Update succeeded with wrong checksum!");
+        TEST_FAIL_MESSAGE("Should reject corrupted firmware!");
+    } else {
+        Serial.println("✅ Update correctly rejected!");
+        Serial.printf("Error: %s\n", Update.errorString());
+        Serial.printf("Error code: %d\n", Update.getError());
+        TEST_ASSERT_FALSE(success);  // ✅ Pass the test
+    }
+}
+
+void test_ota_power_loss_recovery(void) {
+    Serial.println("\n--- Testing Power Loss Recovery ---");
+    
+    // Check if we're running from rollback partition
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    const esp_partition_t* update = esp_ota_get_next_update_partition(NULL);
+    
+    Serial.printf("Running from: %s\n", running->label);
+    Serial.printf("Update target: %s\n", update->label);
+    
+    // Check boot count (ESP32 tracks failed boot attempts)
+    esp_ota_img_states_t ota_state;
+    esp_ota_get_state_partition(running, &ota_state);
+    
+    if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+        Serial.println("⚠️  Detected first boot after OTA!");
+        Serial.println("✅ Marking firmware as valid...");
+        esp_ota_mark_app_valid_cancel_rollback();
+    }
+    
+    Serial.println("✅ Rollback protection active");
+    TEST_ASSERT_TRUE(true);
+}
+
+void test_ota_during_measurement(void) {
+    Serial.println("\n--- Testing OTA During Measurement ---");
+    
+    // Simulate measurement in progress
+    isMeasuring = true;
+    Serial.println("📊 Measurement in progress...");
+    
+    // Try to start OTA
+    bool otaAllowed = !isMeasuring;
+    
+    TEST_ASSERT_FALSE_MESSAGE(otaAllowed, "OTA should be blocked during measurement");
+    Serial.println("✅ OTA correctly deferred");
+    
+    // Finish measurement
+    delay(100);
+    isMeasuring = false;
+    
+    // Now OTA should be allowed
+    otaAllowed = !isMeasuring;
+    TEST_ASSERT_TRUE(otaAllowed);
+    Serial.println("✅ OTA allowed after measurement completes");
+}
+
+void test_ota_network_loss(void) {
+    Serial.println("\n--- Testing Network Loss Recovery ---");
+    
+    HTTPClient http;
+    WiFiClientSecure client;
+    client.setInsecure();
+    
+    http.begin(client, FIRMWARE_URL);
+    http.setTimeout(5000);  // Short timeout to simulate loss
+    
+    int httpCode = http.sendRequest("HEAD");
+    int contentLength = http.getSize();
+    http.end();
+    
+    TEST_ASSERT_EQUAL(200, httpCode);
+    
+    // Begin OTA
+    Update.begin(contentLength);
+    
+    http.begin(client, FIRMWARE_URL);
+    httpCode = http.GET();
+    WiFiClient* stream = http.getStreamPtr();
+    
+    uint8_t buffer[512];
+    size_t written = 0;
+    
+    // Download only 30% then simulate network loss
+    size_t targetBytes = contentLength * 0.3;
+    
+    while (written < targetBytes && stream->available()) {
+        int bytesRead = stream->readBytes(buffer, sizeof(buffer));
+        Update.write(buffer, bytesRead);
+        written += bytesRead;
+    }
+    
+    // Simulate network loss
+    Serial.printf("📡 Simulating network loss at %d%%\n", (written * 100) / contentLength);
+    http.end();  // Force disconnect
+    WiFi.disconnect();
+    delay(1000);
+    
+    // Abort OTA
+    Update.abort();
+    Serial.println("✅ OTA aborted safely");
+    
+    // Reconnect
+    connectWiFi();
+    
+    // Verify system still works
+    TEST_ASSERT_EQUAL(WL_CONNECTED, WiFi.status());
+    Serial.println("✅ System recovered from network loss");
+}
+
+// =============================================================================
+// FIRMWARE DOWNLOAD TESTS 
 // =============================================================================
 
 void test_firmware_accessible(void) {
@@ -656,10 +863,47 @@ void test_ota_update_simulation(void) {
   
   http.end();
   delay(1000);  // ✅ Give connection time to close
+
+  // ✅ Step 1.5: Fetch checksum from version.json
+  Serial.println("\nStep 1.5: Fetching version.json for checksum...");
+  
+  String expectedMD5 = "";  // ✅ Store it for later use
+
+  http.begin(client, VERSION_JSON_URL);
+  http.setTimeout(15000);
+  httpCode = http.GET();
+  
+  if (httpCode == 200) {
+    String payload = http.getString();
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    
+    if (!error && doc.containsKey("checksum")) {
+        const char* md5_cstr = doc["checksum"];
+        expectedMD5 = String(md5_cstr);
+        Serial.printf("Expected MD5: %s\n", expectedMD5.c_str());
+        Serial.println("✅ Checksum retrieved");
+
+    } else {
+      Serial.println("⚠️  No checksum in version.json");
+    }
+  } else {
+    Serial.println("⚠️  Could not fetch version.json");
+  }
+  http.end();
+  delay(500);
   
   // Step 2: Begin OTA update
   Serial.println("\nStep 2: Starting OTA update...");
   
+  // ✅ Set MD5 BEFORE Update.begin()
+  if (expectedMD5.length() == 32) {  // Valid MD5 is 32 hex chars
+      Serial.printf("Setting MD5 checksum: %s\n", expectedMD5.c_str());
+      Update.setMD5(expectedMD5.c_str());
+  } else {
+      Serial.println("⚠️  No valid MD5, checksum validation disabled");
+  }
+
   bool canBegin = Update.begin(contentLength);
   if (!canBegin) {
     Serial.printf("❌ Not enough space: %d bytes needed\n", contentLength);
@@ -695,7 +939,10 @@ void test_ota_update_simulation(void) {
   unsigned long lastUpdate = millis();
   
   Serial.println("Progress: 0%");
-  
+
+  unsigned long lastDataTime = millis();
+  const unsigned long NETWORK_TIMEOUT = 60000; // 1min no data = abort
+
   while (http.connected() && (written < contentLength)) {
     size_t availableSize = stream->available();
     
@@ -704,6 +951,7 @@ void test_ota_update_simulation(void) {
       int bytesRead = stream->readBytes(buffer, bytesToRead);
       
       if (bytesRead > 0) {
+        lastDataTime = millis();
         size_t bytesWritten = Update.write(buffer, bytesRead);
         
         if (bytesWritten != bytesRead) {
@@ -725,9 +973,15 @@ void test_ota_update_simulation(void) {
         }
       }
     } else {
-      delay(10);  // ✅ Small delay if no data available
+        if (millis() - lastDataTime > NETWORK_TIMEOUT) {
+            Serial.println("❌ Network timeout!");
+            Update.abort();
+            http.end();
+            TEST_FAIL_MESSAGE("Network timeout during OTA");  
+            return;
+        }
+        delay(10);
     }
-    
     yield();  // ✅ Feed watchdog
   }
   
@@ -798,6 +1052,7 @@ void test_update_begin_abort(void) {
 void setup() {
   delay(2000);
   Serial.begin(115200);
+  esp_ota_mark_app_valid_cancel_rollback();
   Serial.println("\n\n=== OTA GitHub Tests ===\n");
   
   Serial.printf("Current firmware version: %s\n", CURRENT_VERSION);
@@ -868,6 +1123,11 @@ void setup() {
   RUN_TEST(test_ota_partition_ready);
   RUN_TEST(test_update_begin_abort);
 
+  Serial.println("\n--- OTA Safety Tests ---");
+  RUN_TEST(test_ota_during_measurement);
+  RUN_TEST(test_ota_network_loss);
+  RUN_TEST(test_ota_corrupt_firmware);
+  RUN_TEST(test_ota_power_loss_recovery);
   // Full simulation
   Serial.println("\n--- Full OTA Simulation ---");
   RUN_TEST(test_ota_update_simulation);

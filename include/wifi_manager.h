@@ -48,6 +48,12 @@ bool isFullyConnected();
 bool isAPMode();
 
 /**
+ *   Check if currently in Portal mode
+ * @return true if in AP mode
+ */
+bool isInPairingMode();
+
+/**
  *   Get current WiFi state
  * @return Current state
  */

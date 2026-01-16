@@ -12,6 +12,10 @@
 #include "wifi_manager.h"
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
+#include <Preferences.h>
+
+#define MAX_BUFFERED_READINGS 672  // 1 week at 15-min intervals
+#define BUFFER_NAMESPACE "data_buf"
 
 // Global device ID
 String DEVICE_ID;
@@ -23,7 +27,6 @@ static uint64_t lastDataSendTime = 0;
 static uint64_t lastTriggerCheck = 0;
 static uint64_t lastOtaCheck = 0;
 // for sleep mode
-static bool inPortalMode = false;
 static bool sleepEnabled = true;
 
 // Current metrics
@@ -34,6 +37,232 @@ void handleTriggers();
 void sendData();
 void enterLightSleep();
 void setupMQTT();
+
+struct __attribute__((packed)) CompactReading {
+  uint32_t timestampUnix; 
+  float voltage;          
+  float totalPower;        
+  float energyTotal;       
+  float current[3];        
+  float power[3];         
+  uint8_t batteryPercent; 
+  uint8_t reserved;        
+};
+
+// Buffer metadata
+struct BufferMeta {
+  uint16_t writeIndex;     // Where to write next
+  uint16_t readIndex;      // Where to read next
+  uint16_t count;          // How many readings stored
+};
+
+// Convert EnergyMetrics to compact format
+CompactReading metricsToCompact(const EnergySensor::EnergyMetrics& metrics) {
+  CompactReading compact;
+  struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      compact.timestampUnix = mktime(&timeinfo);
+    } else {
+      compact.timestampUnix = millis() / 1000; // Fallback to uptime in seconds
+    }  
+  compact.voltage = metrics.voltage;
+  compact.totalPower = metrics.totalPower;
+  compact.energyTotal = metrics.energyTotal;
+  // Copy current and power arrays directly
+  for (int i = 0; i < 3; i++) {
+    compact.current[i] = metrics.current[i];
+    compact.power[i] = metrics.power[i];
+  }
+  
+  compact.batteryPercent = (uint8_t)metrics.battery;
+  compact.reserved = 0;
+  
+  return compact;
+}
+
+// Convert compact back to JSON for MQTT
+String compactToJson(const CompactReading& compact) {
+  StaticJsonDocument<512> doc;
+  
+  doc["deviceId"] = DEVICE_ID;
+  
+  // Convert Unix timestamp back to formatted string
+  time_t rawtime = compact.timestampUnix;
+  struct tm* timeinfo = localtime(&rawtime);
+  char timeStr[32];
+  strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", timeinfo);
+  doc["timestamp"] = timeStr;
+  
+  doc["battery"] = compact.batteryPercent;
+  doc["voltage"] = compact.voltage;
+  doc["totalPower"] = compact.totalPower;
+  doc["energyTotal"] = compact.energyTotal;
+  
+  JsonArray phases = doc.createNestedArray("phases");
+  
+  for (int i = 0; i < 3; i++) {
+    JsonObject phase = phases.createNestedObject();
+    phase["current"] = compact.current[i];
+    phase["power"] = compact.power[i];
+  }
+  
+  String output;
+  serializeJson(doc, output);
+  return output;
+}
+
+// Load buffer metadata
+BufferMeta loadBufferMeta() {
+  Preferences prefs;
+  BufferMeta meta = {0, 0, 0};
+  
+  if (prefs.begin(BUFFER_NAMESPACE, true)) {  // Read-only
+    meta.writeIndex = prefs.getUShort("wIdx", 0);
+    meta.readIndex = prefs.getUShort("rIdx", 0);
+    meta.count = prefs.getUShort("count", 0);
+    prefs.end();
+  }
+  
+  return meta;
+}
+
+// Save buffer metadata
+void saveBufferMeta(const BufferMeta& meta) {
+  Preferences prefs;
+  if (prefs.begin(BUFFER_NAMESPACE, false)) {  // Read-write
+    prefs.putUShort("wIdx", meta.writeIndex);
+    prefs.putUShort("rIdx", meta.readIndex);
+    prefs.putUShort("count", meta.count);
+    prefs.end();
+  }
+}
+
+// Buffer a reading
+void bufferReading(const EnergySensor::EnergyMetrics& metrics) {
+  BufferMeta meta = loadBufferMeta();
+  
+  // Convert to compact format
+  CompactReading compact = metricsToCompact(metrics);
+  
+  Preferences prefs;
+  if (!prefs.begin(BUFFER_NAMESPACE, false)) {
+    Utils::logMessage("MAIN", "❌ Failed to open buffer storage");
+    return;
+  }
+  
+  // Store reading as binary blob
+  String key = "d" + String(meta.writeIndex);
+  size_t written = prefs.putBytes(key.c_str(), &compact, sizeof(CompactReading));
+  prefs.end();
+  
+  if (written != sizeof(CompactReading)) {
+    Utils::logMessage("MAIN", "❌ Failed to write reading");
+    return;
+  }
+  
+  // Update metadata
+  meta.writeIndex = (meta.writeIndex + 1) % MAX_BUFFERED_READINGS;
+  
+  if (meta.count < MAX_BUFFERED_READINGS) {
+    meta.count++;
+  } else {
+    // Buffer full - overwrite oldest
+    meta.readIndex = (meta.readIndex + 1) % MAX_BUFFERED_READINGS;
+    Utils::logMessage("MAIN", "⚠️ Buffer full - overwriting oldest");
+  }
+  
+  saveBufferMeta(meta);
+  
+  Utils::logMessageF("MAIN", "📦 Buffered reading %d/%d (index %d)", 
+                    meta.count, MAX_BUFFERED_READINGS, meta.writeIndex - 1);
+}
+
+// Send all buffered data
+void sendBufferedData() {
+  BufferMeta meta = loadBufferMeta();
+  
+  if (meta.count == 0) {
+    return;
+  }
+  
+  Utils::logMessageF("MAIN", "📤 Sending %d buffered readings...", meta.count);
+  
+  Preferences prefs;
+  if (!prefs.begin(BUFFER_NAMESPACE, false)) {
+    Utils::logMessage("MAIN", "❌ Failed to open buffer storage");
+    return;
+  }
+  
+  uint16_t sent = 0;
+  uint16_t failed = 0;
+  
+  while (meta.count > 0 && failed < 3) {  // Stop after 3 consecutive failures
+    String key = "d" + String(meta.readIndex);
+    CompactReading compact;
+    
+    size_t len = prefs.getBytes(key.c_str(), &compact, sizeof(CompactReading));
+    
+    if (len == sizeof(CompactReading)) {
+      // Convert to JSON and publish
+      String json = compactToJson(compact);
+      bool success = MqttManager::publish(MQTT_TOPIC_ENERGY_METRICS, json.c_str(), false, 0);
+      
+      if (success) {
+        sent++;
+        failed = 0;  // Reset failure counter
+        
+        // Remove the reading
+        prefs.remove(key.c_str());
+        
+        // Update metadata
+        meta.readIndex = (meta.readIndex + 1) % MAX_BUFFERED_READINGS;
+        meta.count--;
+        
+        // Progress indicator every 10 readings
+        if (sent % 10 == 0) {
+          Utils::logMessageF("MAIN", "  Progress: %d/%d sent", sent, sent + meta.count);
+        }
+        
+        delay(100);  // Small delay between messages to avoid overwhelming broker
+      } else {
+        failed++;
+        Utils::logMessageF("MAIN", "⚠️ Failed to send reading (attempt %d/3)", failed);
+        delay(1000);  // Wait before retry
+      }
+    } else {
+      // Corrupted reading - skip it
+      Utils::logMessageF("MAIN", "⚠️ Corrupted reading at index %d - skipping", meta.readIndex);
+      prefs.remove(key.c_str());
+      meta.readIndex = (meta.readIndex + 1) % MAX_BUFFERED_READINGS;
+      meta.count--;
+    }
+  }
+  
+  prefs.end();
+  
+  // Save updated metadata
+  saveBufferMeta(meta);
+  
+  Utils::logMessageF("MAIN", "✅ Sent %d buffered readings (%d remaining)", sent, meta.count);
+}
+
+// Clear all buffered data (for reset/debug)
+void clearBuffer() {
+  Preferences prefs;
+  if (prefs.begin(BUFFER_NAMESPACE, false)) {
+    prefs.clear();
+    prefs.end();
+    Utils::logMessage("MAIN", "🗑️ Buffer cleared");
+  }
+}
+
+// Get buffer stats
+void printBufferStats() {
+  BufferMeta meta = loadBufferMeta();
+  float usagePercent = (meta.count * 100.0) / MAX_BUFFERED_READINGS;
+  Utils::logMessageF("MAIN", "📊 Buffer: %d/%d readings (%.1f%%)", 
+                    meta.count, MAX_BUFFERED_READINGS, usagePercent);
+}
 
 // FOR FUTURE WITH VPS BROKER
 //  void setupSecureMQTT();
@@ -285,7 +514,7 @@ void printDiagnostics() {
 
 void loop() {
   uint64_t now = Utils::millis64();
-  yield();  // ✅ Feed watchdog
+  yield();
 
   static bool otaValidated = false;
   if (!otaValidated && millis() > 30000) {
@@ -294,100 +523,135 @@ void loop() {
     Utils::logMessage("MAIN", "OTA firmware marked as valid");
   }
 
-  // ✅ Skip everything if portal is active
   if (WifiManager::isPortalActive()) {
-    // MqttManager::loop();
     Utils::delayTask(1000);
     return;
   }
 
-  // ✅ Skip if WiFi not connected
   if (!WifiManager::isFullyConnected()) {
     Utils::delayTask(1000);
     return;
   }
 
-  // ✅ Reconnect MQTT with retry limit
+  // ✅ MQTT reconnection with fallback mode
+  static uint32_t mqttDisconnectedAt = 0;
+  static bool mqttInFallbackMode = false;
+  static uint32_t lastFallbackRetry = 0;
+  static bool mqttStateResolved = false;  // ✅ NEW FLAG
+  
   if (!MqttManager::isConnected()) {
-    static uint32_t lastMqttReconnectAttempt = 0;
-    static uint32_t mqttReconnectAttempts = 0;
-    
-    if (millis() - lastMqttReconnectAttempt > 10000) {  // ✅ Try every 10 seconds
-      mqttReconnectAttempts++;
-      
-      if (mqttReconnectAttempts <= 10) {  // ✅ Max 10 attempts
-        Utils::logMessageF("MAIN", "MQTT reconnect attempt %d/10", mqttReconnectAttempts);
-        MqttManager::reconnect();
-        lastMqttReconnectAttempt = millis();
-      } else {
-        // ✅ After 10 failed attempts, wait longer (1 minute)
-        if (millis() - lastMqttReconnectAttempt > 60000) {
-          Utils::logMessage("MAIN", "Retrying MQTT after cooldown...");
-          mqttReconnectAttempts = 0;  // Reset counter
-          lastMqttReconnectAttempt = millis();
-        }
-      }
+    // Track when disconnection started
+    if (mqttDisconnectedAt == 0) {
+      mqttDisconnectedAt = millis();
+      Utils::logMessage("MAIN", "MQTT disconnected - automatic retry active");
     }
     
-    Utils::delayTask(1000);
-    return;
+    // After 2 minutes, enter fallback mode
+    const uint32_t FALLBACK_THRESHOLD = 60000;  // 1 minute
+    if (!mqttInFallbackMode && (millis() - mqttDisconnectedAt) > FALLBACK_THRESHOLD) {
+      Utils::logMessage("MAIN", "⚠️ MQTT unavailable for 2+ minutes");
+      Utils::logMessage("MAIN", "Entering fallback mode - will retry every 5 minutes");
+      mqttInFallbackMode = true;
+      mqttStateResolved = true;  // ✅ State is now resolved (failed)
+      lastFallbackRetry = millis();
+      
+      MqttManager::setAutoReconnect(false);
+      MqttManager::disconnect();
+    }
+    
+    // In fallback mode, retry every 5 minutes
+    if (mqttInFallbackMode) {
+      const uint32_t FALLBACK_RETRY = 300000;  // 5 minutes
+      
+      if (millis() - lastFallbackRetry > FALLBACK_RETRY) {
+        Utils::logMessage("MAIN", "🔄 Fallback retry: Testing MQTT connection...");
+        lastFallbackRetry = millis();
+        
+        MqttManager::setAutoReconnect(true);
+        MqttManager::reconnect();
+        
+        uint32_t retryStart = millis();
+        while (!MqttManager::isConnected() && (millis() - retryStart) < 20000) {
+          MqttManager::loop();
+          delay(500);
+          yield();
+        }
+        
+        if (!MqttManager::isConnected()) {
+          Utils::logMessage("MAIN", "Retry failed - continuing in fallback mode");
+          MqttManager::setAutoReconnect(false);
+          MqttManager::disconnect();
+        } else {
+          Utils::logMessage("MAIN", "✅ Retry succeeded!");
+        }
+      }
+    } else {
+      // NOT in fallback mode yet - let MQTT try its internal reconnection
+      MqttManager::loop();
+    }
+  } else {
+    // Connected! Reset everything
+    if (mqttDisconnectedAt > 0) {
+      uint32_t downtime = (millis() - mqttDisconnectedAt) / 1000;
+      Utils::logMessageF("MAIN", "✅ MQTT reconnected (was down %ds)", downtime);
+      mqttDisconnectedAt = 0;
+      mqttInFallbackMode = false;
+      MqttManager::setAutoReconnect(true);
+    }
+    
+    mqttStateResolved = true;  // ✅ State is now resolved (connected)
+    MqttManager::loop();
   }
-  
-  // ✅ Reset reconnect counter when connected
-  static uint32_t mqttReconnectAttempts = 0;
-  mqttReconnectAttempts = 0;
 
-  // Process MQTT messages
-  MqttManager::loop();
+  // ✅ BLOCK EVERYTHING UNTIL MQTT STATE IS RESOLVED
+  if (!mqttStateResolved) {
+    Utils::delayTask(1000);
+    return;  // ✅ Exit early - don't do OTA, sensors, or sleep
+  }
+
+  // ===== REST OF LOOP ONLY RUNS AFTER MQTT STATE IS RESOLVED =====
+
   OtaManager::loop();
   
-    // Check for MQTT triggers
-  if (now - lastTriggerCheck >= TRIGGER_CHECK_INTERVAL_MS) {
+  if (MqttManager::isConnected() && now - lastTriggerCheck >= TRIGGER_CHECK_INTERVAL_MS) {
     handleTriggers();
     lastTriggerCheck = now;
   }
 
-  // Check for sensor reading interval
   if (now - lastDataSendTime >= DATA_SEND_INTERVAL_MS) {
     Utils::logMessage("MAIN", "Sensor reading interval reached");
 
-    // Update battery status
     BatteryManager::update();
-
-    // Read sensors
     EnergySensor::readSensors(currentMetrics);
     EnergySensor::printMetrics(currentMetrics);
-
-    // Send data
     sendData();
-
     lastDataSendTime = now;
 
-    // just in case process any pending triggers
-    MqttManager::loop();
-    handleTriggers();
+    if (MqttManager::isConnected()) {
+      handleTriggers();
+    }
 
-    // ✅ Debug logging before sleep check
-    Utils::logMessageF("MAIN", "Sleep check: enabled=%d, portalMode=%d, portalActive=%d", 
-                      sleepEnabled, inPortalMode, WifiManager::isPortalActive());
+    Utils::logMessageF("MAIN", "Sleep check: enabled=%d, pairingMode=%d, portalActive=%d, mqttFailed=%d", 
+                      sleepEnabled ? 1 : 0, 
+                      WifiManager::isInPairingMode() ? 1 : 0,
+                      WifiManager::isPortalActive() ? 1 : 0,
+                      mqttInFallbackMode ? 1 : 0);
 
-    if (sleepEnabled && !inPortalMode && !WifiManager::isPortalActive()) {
+    if (sleepEnabled && !WifiManager::isInPairingMode() && !WifiManager::isPortalActive()) {
       enterLightSleep();
     } else {
       Utils::logMessage("MAIN", "⏭ Skipping sleep (conditions not met)");
     }
   }
-  
 
-  // Check for OTA updates periodically
-  if (OtaManager::shouldCheckNow(lastOtaCheck)) {
+  if (MqttManager::isConnected() && OtaManager::shouldCheckNow(lastOtaCheck)) {
     Utils::logMessage("MAIN", "Scheduled OTA check");
     if (OtaManager::checkForUpdate()) {
       OtaManager::performUpdate();
     }
     lastOtaCheck = now;
   }
-  MqttManager::loop();
+  
   Utils::delayTask(100);
 }
 
@@ -400,7 +664,6 @@ void handleBootMode(ButtonManager::BootMode mode) {
 
   case ButtonManager::BOOT_WIFI_PAIR:
     Utils::logMessage("MAIN", "Entering WiFi pairing mode...");
-    inPortalMode = true;
     WifiManager::startPortal(true);
     break;
 
@@ -449,18 +712,30 @@ void handleTriggers() {
 }
 
 void sendData() {
-  bool sent = false;
-
   if (WifiManager::isFullyConnected() && MqttManager::isConnected()) {
-    sent = MqttManager::publishMetrics(currentMetrics);
-    if (sent) {
-      Utils::logMessage("MAIN", "Data sent via MQTT");
+    // ✅ FIRST: Send any buffered data
+    sendBufferedData();
+    
+    // ✅ SECOND: Send current reading
+    bool success = MqttManager::publishMetrics(currentMetrics);
+    if (success) {
+      Utils::logMessage("MAIN", "✅ Current data sent via MQTT");
+    } else {
+      Utils::logMessage("MAIN", "⚠️ Failed to send current data - buffering");
+      bufferReading(currentMetrics);
     }
-    if (!sent) {
-      Utils::logMessage("MAIN", "Warning: No transmission channel available");
+    
+  } else {
+    // ✅ MQTT not available - buffer the data
+    bufferReading(currentMetrics);
   }
+  
+  // Print buffer stats periodically
+  static uint8_t statsCounter = 0;
+  if (++statsCounter >= 10) {  // Every 10 readings
+    printBufferStats();
+    statsCounter = 0;
   }
-
 }
 
 void enterLightSleep() {
@@ -529,7 +804,6 @@ void enterLightSleep() {
   }
 
   if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
-    inPortalMode = true;
   }
 
   // Reconnect WiFi
@@ -554,10 +828,9 @@ void enterLightSleep() {
   delay(3000);  // ✅ Give TCP/IP stack time to stabilize
 
   // Handle portal mode if button was pressed
-  if (inPortalMode) {
+  if (WifiManager::isInPairingMode()) {  // ✅ USE FUNCTION INSTEAD
     Utils::logMessage("MAIN", "Starting portal (button during sleep)");
     WifiManager::startPortal(true);
-    inPortalMode = false;
     return;
   }
 

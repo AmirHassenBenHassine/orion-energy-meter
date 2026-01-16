@@ -36,7 +36,7 @@ extern String DEVICE_ID;
 // TIMING CONSTANTS
 #define DATA_SEND_INTERVAL_MS 30000      // 30 seconds
 #define TRIGGER_CHECK_INTERVAL_MS 60000  // 1 minute
-#define WAKEUP_TIME_MS 60000            // 5 minute=300000
+#define WAKEUP_TIME_MS 900000            // 15 minute=900000
 #define OTA_CHECK_INTERVAL_MS 86400000   // 24 hours
 
 // LED TIMING
