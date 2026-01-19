@@ -131,20 +131,14 @@ bool begin(const MqttBrokerConfig &brokerConfig) {
     // ✅ If still empty, use config.h defaults
     if (strlen(_username) == 0 && strlen(MQTT_DEFAULT_USERNAME) > 0) {
       strncpy(_username, MQTT_DEFAULT_USERNAME, sizeof(_username) - 1);
-      Utils::logMessage("MQTT", "Using default username from config.h");
     }
     if (strlen(_password) == 0 && strlen(MQTT_DEFAULT_PASSWORD) > 0) {
       strncpy(_password, MQTT_DEFAULT_PASSWORD, sizeof(_password) - 1);
-      Utils::logMessage("MQTT", "Using default password from config.h");
     }
   }
 
   // ✅ Log what credentials we're using (masked password)
-  if (strlen(_username) > 0) {
-    Utils::logMessageF("MQTT", "Credentials: username='%s', password='%s'", 
-                      _username, 
-                      strlen(_password) > 0 ? "***" : "(empty)");
-  } else {
+  if (strlen(_username) < 0) {
     Utils::logMessage("MQTT", "WARNING: No credentials configured!");
   }
 
@@ -155,7 +149,6 @@ bool begin(const MqttBrokerConfig &brokerConfig) {
     _setupTLS();
     _mqttClient = new PubSubClient(*_secureClient);
   } else {
-    Utils::logMessage("MQTT", "Using non-TLS connection");
     _insecureClient = new WiFiClient();
     _mqttClient = new PubSubClient(*_insecureClient);
   }

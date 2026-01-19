@@ -123,12 +123,10 @@ extern String DEVICE_ID;
 #define NTP_DAYLIGHT_OFFSET_SEC 3600
 
 // OTA CONFIGURATION
-#define OTA_FIRMWARE_URL                                                       \
-  "https://github.com/DioneProtocol/orion-firmware/raw/refs/heads/main/"       \
-  "firmware.bin"
+#define FIRMWARE_URL "https://raw.githubusercontent.com/AmirHassenBenHassine/orion-ota-update/main/finalOrion_transmiter.ino1.bin"
+#define VERSION_JSON_URL "https://raw.githubusercontent.com/AmirHassenBenHassine/orion-ota-update/main/version.json"
 
 #define FIRMWARE_VERSION "1.0.0"
-
 #define OTA_CHECK_INTERVAL_MS 86400000 // Check daily (24 hours)
 
 // FREERTOS TASK CONFIGURATION

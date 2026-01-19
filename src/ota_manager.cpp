@@ -13,8 +13,9 @@
 namespace OtaManager {
 
 static const uint32_t HTTP_TIMEOUT_MS = 60000;
-static const uint32_t DOWNLOAD_BUFFER_SIZE = 1024;
+static const uint32_t DOWNLOAD_BUFFER_SIZE = 512;
 static const uint32_t PROGRESS_REPORT_INTERVAL = 5; // Report every 5%
+static const uint32_t NETWORK_TIMEOUT_MS = 60000;  // ✅ NEW: Network timeout
 static const char *PREF_KEY_ETAG = "fw_etag";
 static const char *PREF_KEY_POST_UPDATE = "post_ota";
 static const char *PREF_KEY_VERSION = "fw_version";
@@ -29,7 +30,8 @@ static OtaProgress _progress;
 static OtaUpdateInfo _updateInfo;
 
 // Configuration
-static String _firmwareUrl = OTA_FIRMWARE_URL;
+static String _firmwareUrl = FIRMWARE_URL;
+static String _versionJsonUrl = VERSION_JSON_URL;
 static uint32_t _checkIntervalMs = OTA_CHECK_INTERVAL_MS;
 
 // Callbacks
@@ -42,6 +44,10 @@ static volatile bool _cancelRequested = false;
 // Initialized flag
 static bool _initialized = false;
 
+// ✅ NEW: Measurement blocking
+static volatile bool _measurementActive = false;
+static bool _updatePending = false;
+
 static void _setState(OtaState newState);
 static void _setError(OtaError error, const String &message);
 static void _clearError();
@@ -51,6 +57,7 @@ static void _saveEtag(const String &etag);
 static String _loadEtag();
 static void _setPostUpdateFlag();
 static void _blinkProgress(uint8_t percentage);
+static int _compareVersions(const String &v1, const String &v2);  // ✅ NEW
 
 bool begin() {
   if (_initialized) {
@@ -73,10 +80,9 @@ bool begin() {
   _updateInfo.size = 0;
   _updateInfo.url = _firmwareUrl;
 
-  // Check for post-update boot
+  // ✅ SIMPLE: If we booted after OTA, we're valid (we booted = we work)
   if (isPostUpdateBoot()) {
-
-    // Mark firmware as valid
+    Utils::logMessage("OTA", "First boot after OTA - marking firmware as valid");
     markFirmwareValid();
   }
 
@@ -89,6 +95,14 @@ bool begin() {
 
 void loop() {
   static uint64_t lastAutoCheck = 0;
+
+  // ✅ SAFETY: Check if update is pending and measurement is complete
+  if (_updatePending && !_measurementActive) {
+    Utils::logMessage("OTA", "Measurement complete - installing pending update");
+    performUpdate();
+    _updatePending = false;
+    return;
+  }
 
   if (_checkIntervalMs > 0 && _initialized) {
     uint64_t now = Utils::millis64();
@@ -103,6 +117,73 @@ void stop() {
   cancelUpdate();
   _initialized = false;
   Utils::logMessage("OTA", "OTA Manager stopped");
+}
+
+// ✅ NEW: Set measurement active state
+void setMeasurementActive(bool active) {
+  _measurementActive = active;
+  if (active) {
+    Utils::logMessage("OTA", "📊 Measurement started - OTA will wait");
+  } else {
+    Utils::logMessage("OTA", "✅ Measurement complete - OTA can proceed");
+  }
+}
+
+bool isMeasurementActive() {
+  return _measurementActive;
+}
+
+// ✅ NEW: Fetch checksum from version.json on GitHub
+String fetchChecksumFromGitHub() {
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  http.begin(client, _versionJsonUrl);
+  http.setTimeout(15000);
+
+  int httpCode = http.GET();
+
+  if (httpCode != 200) {
+    Utils::logMessageF("OTA", "Failed to fetch version.json: HTTP %d", httpCode);
+    http.end();
+    return "";
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    Utils::logMessage("OTA", "Failed to parse version.json");
+    return "";
+  }
+
+  const char* checksum = doc["checksum"];
+  const char* version = doc["version"];
+
+  if (checksum && version) {
+    Utils::logMessageF("OTA", "Found version %s with checksum %s", version, checksum);
+    _updateInfo.newVersion = String(version);
+    return String(checksum);
+  }
+
+  return "";
+}
+
+// ✅ NEW: Compare semantic versions
+static int _compareVersions(const String &v1, const String &v2) {
+  int major1 = 0, minor1 = 0, patch1 = 0;
+  int major2 = 0, minor2 = 0, patch2 = 0;
+
+  sscanf(v1.c_str(), "%d.%d.%d", &major1, &minor1, &patch1);
+  sscanf(v2.c_str(), "%d.%d.%d", &major2, &minor2, &patch2);
+
+  if (major1 != major2) return major1 - major2;
+  if (minor1 != minor2) return minor1 - minor2;
+  return patch1 - patch2;
 }
 
 bool checkForUpdate(OtaUpdateInfo *info) {
@@ -138,7 +219,7 @@ bool checkForUpdate(OtaUpdateInfo *info) {
 
   // Collect headers
   const char *headers[] = {"ETag", "Last-Modified", "Content-Length"};
-  http.collectHeaders(headers, 3);
+  http.collectHeaders(headers, 2);
 
   // Send HEAD request to check for update
   int httpCode = http.sendRequest("HEAD");
@@ -158,11 +239,36 @@ bool checkForUpdate(OtaUpdateInfo *info) {
   String contentLength = http.header("Content-Length");
   http.end();
 
+  // ✅ NEW: Fetch version info from version.json
+  String newVersion = "";
+  String checksum = fetchChecksumFromGitHub();
+  
+  if (_updateInfo.newVersion.length() > 0) {
+    newVersion = _updateInfo.newVersion;
+  }
+
   // Load stored ETag
   String storedEtag = _loadEtag();
 
   Utils::logMessageF("OTA", "Stored ETag: %s", storedEtag.c_str());
   Utils::logMessageF("OTA", "Server ETag: %s", serverEtag.c_str());
+
+  // ✅ NEW: Version comparison
+  if (newVersion.length() > 0) {
+    int versionCompare = _compareVersions(newVersion, FIRMWARE_VERSION);
+    
+    if (versionCompare <= 0) {
+      Utils::logMessageF("OTA", "Already on latest version (%s >= %s)", 
+                        FIRMWARE_VERSION, newVersion.c_str());
+      _updateInfo.available = false;
+      _setState(OTA_STATE_NO_UPDATE);
+      if (info) *info = _updateInfo;
+      return false;
+    }
+    
+    Utils::logMessageF("OTA", "New version available: %s -> %s", 
+                      FIRMWARE_VERSION, newVersion.c_str());
+  }
 
   // Update info structure
   _updateInfo.currentVersion = FIRMWARE_VERSION;
@@ -200,9 +306,19 @@ bool performUpdate() {
     return false;
   }
 
+  // ✅ SAFETY: Check if measurement is active
+  if (_measurementActive) {
+    Utils::logMessage("OTA", "⏸️  Measurement in progress - deferring update");
+    _updatePending = true;
+    return false;
+  }
+
   _cancelRequested = false;
 
-  Utils::logMessage("OTA", "   STARTING FIRMWARE UPDATE");
+  Utils::logMessage("OTA", "=== STARTING FIRMWARE UPDATE ===");
+  Utils::logMessageF("OTA", "Version: %s -> %s", 
+                    _updateInfo.currentVersion.c_str(), 
+                    _updateInfo.newVersion.c_str());
 
   LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_FAST);
 
@@ -331,7 +447,7 @@ void markFirmwareValid() {
   if (esp_ota_get_state_partition(running, &state) == ESP_OK) {
     if (state == ESP_OTA_IMG_PENDING_VERIFY) {
       esp_ota_mark_app_valid_cancel_rollback();
-      Utils::logMessage("OTA", "Firmware marked as valid");
+      Utils::logMessage("OTA", "✅ Firmware marked as valid");
     }
   }
 
@@ -425,6 +541,9 @@ static bool _downloadAndInstall() {
   http.setConnectTimeout(HTTP_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
 
+  // ✅ STEP 1: Get checksum from GitHub
+  String expectedMD5 = fetchChecksumFromGitHub();
+
   if (!http.begin(client, _firmwareUrl)) {
     _setError(OTA_ERROR_CONNECTION_FAILED, "Failed to begin HTTP connection");
     _setState(OTA_STATE_FAILED);
@@ -443,14 +562,22 @@ static bool _downloadAndInstall() {
   int contentLength = http.getSize();
 
   if (contentLength <= 0) {
-    _setError(OTA_ERROR_INVALID_SIZE,
-              "Invalid content length: " + String(contentLength));
+    _setError(OTA_ERROR_INVALID_SIZE, "Invalid content length: " + String(contentLength));
     _setState(OTA_STATE_FAILED);
     http.end();
     return false;
   }
 
-  Utils::logMessageF("OTA", "Firmware size: %d bytes", contentLength);
+  Utils::logMessageF("OTA", "Firmware size: %d bytes (%.2f MB)", 
+                    contentLength, contentLength / 1024.0 / 1024.0);
+
+  // ✅ SAFETY: Set MD5 checksum BEFORE Update.begin()
+  if (expectedMD5.length() == 32) {
+    Utils::logMessageF("OTA", "Setting MD5 checksum: %s", expectedMD5.c_str());
+    Update.setMD5(expectedMD5.c_str());
+  } else {
+    Utils::logMessage("OTA", "⚠️  No MD5 checksum available - validation disabled");
+  }
 
   // Check available space
   if (!Update.begin(contentLength)) {
@@ -463,14 +590,15 @@ static bool _downloadAndInstall() {
   _setState(OTA_STATE_INSTALLING);
   Utils::logMessage("OTA", "Installing firmware...");
 
-  // Download and write
+  // ✅ SAFETY: Download with network timeout
   WiFiClient *stream = http.getStreamPtr();
   uint8_t buffer[DOWNLOAD_BUFFER_SIZE];
   size_t totalWritten = 0;
   uint8_t lastReportedPercent = 0;
+  unsigned long lastDataTime = millis();
 
   while (http.connected() && totalWritten < contentLength) {
-    // Check for cancellation
+    // ✅ SAFETY: Check for cancellation
     if (_cancelRequested) {
       _setError(OTA_ERROR_CANCELLED, "Update cancelled by user");
       Update.abort();
@@ -482,6 +610,8 @@ static bool _downloadAndInstall() {
     size_t available = stream->available();
 
     if (available) {
+      lastDataTime = millis();  // ✅ Reset timeout on data received
+
       size_t toRead = min(available, sizeof(buffer));
       size_t bytesRead = stream->readBytes(buffer, toRead);
 
@@ -490,8 +620,7 @@ static bool _downloadAndInstall() {
 
         if (bytesWritten != bytesRead) {
           _setError(OTA_ERROR_WRITE_FAILED,
-                    "Write mismatch: " + String(bytesWritten) + "/" +
-                        String(bytesRead));
+                    "Write mismatch: " + String(bytesWritten) + "/" + String(bytesRead));
           Update.abort();
           http.end();
           _setState(OTA_STATE_FAILED);
@@ -511,19 +640,28 @@ static bool _downloadAndInstall() {
           lastReportedPercent = currentPercent;
         }
       }
+    } else {
+      // ✅ SAFETY: Check network timeout
+      if (millis() - lastDataTime > NETWORK_TIMEOUT_MS) {
+        _setError(OTA_ERROR_TIMEOUT, "Network timeout - no data received");
+        Update.abort();
+        http.end();
+        _setState(OTA_STATE_FAILED);
+        Utils::logMessage("OTA", "❌ Network timeout during download");
+        return false;
+      }
+      delay(10);
     }
 
-    // Small delay
     yield();
   }
 
   http.end();
 
-  // Verify download complete
+  // ✅ SAFETY: Verify download complete
   if (totalWritten != contentLength) {
     _setError(OTA_ERROR_VERIFICATION_FAILED,
-              "Incomplete download: " + String(totalWritten) + "/" +
-                  String(contentLength));
+              "Incomplete download: " + String(totalWritten) + "/" + String(contentLength));
     Update.abort();
     _setState(OTA_STATE_FAILED);
     return false;
@@ -532,9 +670,10 @@ static bool _downloadAndInstall() {
   _setState(OTA_STATE_VERIFYING);
   Utils::logMessage("OTA", "Verifying firmware...");
 
-  // Finalize update
-  if (!Update.end()) {
-    _setError(OTA_ERROR_FINALIZATION_FAILED, "Update.end() failed");
+  // ✅ SAFETY: Finalize with MD5 check (if set)
+  if (!Update.end(true)) {
+    _setError(OTA_ERROR_FINALIZATION_FAILED, 
+              String("Update.end() failed: ") + Update.errorString());
     Update.printError(Serial);
     _setState(OTA_STATE_FAILED);
     return false;
@@ -549,13 +688,13 @@ static bool _downloadAndInstall() {
   // Save new ETag
   _saveEtag(_updateInfo.etag);
 
-  // Set post-update flag
+  // ✅ SAFETY: Set post-update flag for validation on next boot
   _setPostUpdateFlag();
 
   _setState(OTA_STATE_SUCCESS);
 
-  Utils::logMessage("OTA", "UPDATE SUCCESSFUL!");
-  Utils::logMessage("OTA", "Rebooting");
+  Utils::logMessage("OTA", "✅ UPDATE SUCCESSFUL!");
+  Utils::logMessage("OTA", "Device will reboot in 3 seconds...");
 
   // Success indication
   LedManager::runSuccessSequence();

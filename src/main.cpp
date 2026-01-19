@@ -368,29 +368,28 @@ void setup() {
     }
   }
 
-  // uint32_t mqttWaitStart = millis();
-  // while (!MqttManager::isConnected() && (millis() - mqttWaitStart) < 10000) {
-  //   MqttManager::loop();
-  //   vTaskDelay(pdMS_TO_TICKS(100));
-  //   yield();
-  // }
-  
-  // if (MqttManager::isConnected()) {
-  //   Utils::logMessage("MAIN", "✓ MQTT connected successfully!");
-  // } else {
-  //   Utils::logMessage("MAIN", "✗ MQTT connection timeout!");
-  //   Utils::logMessageF("MAIN", "  Error: %s", MqttManager::getLastError().c_str());
-  // }
-
-
   Utils::logMessage("MAIN", "Step 5: Initializing OTA...");
+
   OtaManager::begin();
 
-  // Utils::logMessage("MAIN", "Step 6: Taking initial sensor reading...");
-  
-  // EnergySensor::readSensors(currentMetrics);
-  // EnergySensor::printMetrics(currentMetrics);
-  // sendData();
+  if (WifiManager::isFullyConnected()) {
+      Utils::logMessage("MAIN", "Checking for updates...");
+      
+      OtaManager::OtaUpdateInfo info;
+      if (OtaManager::checkForUpdate(&info)) {
+          Utils::logMessageF("MAIN", "✅ Update available: %s -> %s", 
+                            info.currentVersion.c_str(), 
+                            info.newVersion.c_str());
+          Utils::logMessage("MAIN", "Starting update in 3 seconds...");
+          delay(3000);
+          OtaManager::performUpdate();
+      } else {
+          Utils::logMessage("MAIN", "No updates available");
+          Utils::logMessageF("MAIN", "Current: %s, Latest: %s", 
+                            FIRMWARE_VERSION, 
+                            info.newVersion.c_str());
+      }
+  }
 
   lastDataSendTime = Utils::millis64();
   lastTriggerCheck = Utils::millis64();
@@ -474,54 +473,27 @@ void setupMQTT() {
 // }
 // XXXXXXXXXXXXXXXXXXXXXX-XXXXXXXXXXXXXXXXXXXX-XXXXXXXXXXXXXXo
 
-void printDiagnostics() {
-  Serial.println("\n========== DIAGNOSTICS ==========");
-  
-  // System
-  Serial.printf("Uptime: %llu ms\n", Utils::millis64());
-  Serial.printf("Free Heap: %d bytes\n", ESP.getFreeHeap());
-  
-  // WiFi
-  Serial.println("\n--- WiFi ---");
-  Serial.printf("Connected: %s\n", WiFi.isConnected() ? "YES" : "NO");
-  Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
-  Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
-  Serial.printf("State: %d\n", WifiManager::getState());
-  
-  // MQTT
-  Serial.println("\n--- MQTT ---");
-  Serial.printf("Connected: %s\n", MqttManager::isConnected() ? "YES" : "NO");
-  Serial.printf("State: %s\n", MqttManager::stateToString(MqttManager::getState()));
-  
-  // Battery
-  Serial.println("\n--- Battery ---");
-  Serial.printf("Level: %.1f%%\n", BatteryManager::getPercentage());
-  Serial.printf("Charging: %s\n", BatteryManager::isCharging() ? "YES" : "NO");
-  Serial.printf("Voltage: %.2f V\n", BatteryManager::getVoltage());
-  
-  // LEDs
-  Serial.println("\n--- LEDs ---");
-  const char* ledNames[] = {"Power", "WiFi", "Charging", "Battery"};
-  for (int i = 0; i < 4; i++) {
-    Serial.printf("%s LED: mode=%d, state=%d\n", 
-                  ledNames[i],
-                  LedManager::getMode((LedManager::LedType)i),
-                  digitalRead(i == 0 ? 14 : (i == 1 ? 27 : (i == 2 ? 26 : 25))));
-  }
-  
-  Serial.println("=================================\n");
+void takeEnergyMeasurement() {
+    // ✅ Tell OTA manager that measurement is starting
+    OtaManager::setMeasurementActive(true);
+    
+    // Your existing measurement code
+    EnergySensor::readSensors(currentMetrics);
+    
+    // ✅ Tell OTA manager that measurement is complete
+    OtaManager::setMeasurementActive(false);
 }
 
 void loop() {
   uint64_t now = Utils::millis64();
   yield();
 
-  static bool otaValidated = false;
-  if (!otaValidated && millis() > 30000) {
-    OtaManager::markFirmwareValid();
-    otaValidated = true;
-    Utils::logMessage("MAIN", "OTA firmware marked as valid");
-  }
+  // static bool otaValidated = false;
+  // if (!otaValidated && millis() > 30000) {
+  //   OtaManager::markFirmwareValid();
+  //   otaValidated = true;
+  //   Utils::logMessage("MAIN", "OTA firmware marked as valid");
+  // }
 
   if (WifiManager::isPortalActive()) {
     Utils::delayTask(1000);
@@ -533,17 +505,16 @@ void loop() {
     return;
   }
 
-  // ✅ MQTT reconnection with fallback mode
+  //MQTT reconnection with fallback mode
   static uint32_t mqttDisconnectedAt = 0;
   static bool mqttInFallbackMode = false;
   static uint32_t lastFallbackRetry = 0;
-  static bool mqttStateResolved = false;  // ✅ NEW FLAG
+  static bool mqttStateResolved = false; 
   
   if (!MqttManager::isConnected()) {
     // Track when disconnection started
     if (mqttDisconnectedAt == 0) {
       mqttDisconnectedAt = millis();
-      Utils::logMessage("MAIN", "MQTT disconnected - automatic retry active");
     }
     
     // After 2 minutes, enter fallback mode
@@ -552,7 +523,7 @@ void loop() {
       Utils::logMessage("MAIN", "⚠️ MQTT unavailable for 2+ minutes");
       Utils::logMessage("MAIN", "Entering fallback mode - will retry every 5 minutes");
       mqttInFallbackMode = true;
-      mqttStateResolved = true;  // ✅ State is now resolved (failed)
+      mqttStateResolved = true; 
       lastFallbackRetry = millis();
       
       MqttManager::setAutoReconnect(false);
@@ -593,23 +564,19 @@ void loop() {
     // Connected! Reset everything
     if (mqttDisconnectedAt > 0) {
       uint32_t downtime = (millis() - mqttDisconnectedAt) / 1000;
-      Utils::logMessageF("MAIN", "✅ MQTT reconnected (was down %ds)", downtime);
       mqttDisconnectedAt = 0;
       mqttInFallbackMode = false;
       MqttManager::setAutoReconnect(true);
     }
     
-    mqttStateResolved = true;  // ✅ State is now resolved (connected)
+    mqttStateResolved = true;  
     MqttManager::loop();
   }
 
-  // ✅ BLOCK EVERYTHING UNTIL MQTT STATE IS RESOLVED
   if (!mqttStateResolved) {
     Utils::delayTask(1000);
-    return;  // ✅ Exit early - don't do OTA, sensors, or sleep
+    return; 
   }
-
-  // ===== REST OF LOOP ONLY RUNS AFTER MQTT STATE IS RESOLVED =====
 
   OtaManager::loop();
   
@@ -622,13 +589,30 @@ void loop() {
     Utils::logMessage("MAIN", "Sensor reading interval reached");
 
     BatteryManager::update();
-    EnergySensor::readSensors(currentMetrics);
+    takeEnergyMeasurement();
     EnergySensor::printMetrics(currentMetrics);
     sendData();
     lastDataSendTime = now;
 
     if (MqttManager::isConnected()) {
       handleTriggers();
+    }
+
+    OtaManager::loop();
+    delay(100);
+    
+    // ✅ CORRECT - Use namespace prefix
+    OtaManager::OtaState otaState = OtaManager::getState();
+    if (otaState == OtaManager::OTA_STATE_DOWNLOADING || 
+        otaState == OtaManager::OTA_STATE_INSTALLING || 
+        otaState == OtaManager::OTA_STATE_VERIFYING) {
+        // OTA in progress - skip sleep
+        Utils::logMessage("MAIN", "⏭ Skipping sleep (OTA in progress)");
+        return;
+    }
+    else {
+        Utils::logMessage("MAIN", "No updates in progress");
+
     }
 
     Utils::logMessageF("MAIN", "Sleep check: enabled=%d, pairingMode=%d, portalActive=%d, mqttFailed=%d", 
@@ -669,7 +653,6 @@ void handleBootMode(ButtonManager::BootMode mode) {
 
   case ButtonManager::BOOT_NORMAL:
   default:
-    Utils::logMessage("MAIN", "Normal boot");
     break;
   }
 }
@@ -712,6 +695,9 @@ void handleTriggers() {
 }
 
 void sendData() {
+  // ✅ START: Tell OTA we're measuring
+  OtaManager::setMeasurementActive(true);
+
   if (WifiManager::isFullyConnected() && MqttManager::isConnected()) {
     // ✅ FIRST: Send any buffered data
     sendBufferedData();
@@ -736,6 +722,9 @@ void sendData() {
     printBufferStats();
     statsCounter = 0;
   }
+
+  // ✅ END: Tell OTA measurement is done
+  OtaManager::setMeasurementActive(false);
 }
 
 void enterLightSleep() {

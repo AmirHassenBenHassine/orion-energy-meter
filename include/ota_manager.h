@@ -2,6 +2,7 @@
 #define OTA_MANAGER_H
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 
 namespace OtaManager {
 
@@ -143,6 +144,24 @@ String getLastErrorMessage();
  * @return Update info structure
  */
 OtaUpdateInfo getUpdateInfo();
+
+/**
+ * Set measurement active state (OTA waits if true)
+ * @param active true if measurement in progress
+ */
+void setMeasurementActive(bool active);
+
+/**
+ * Check if measurement is blocking OTA
+ * @return true if OTA is blocked by measurement
+ */
+bool isMeasurementActive();
+
+/**
+ * Get MD5 checksum from version.json
+ * @return MD5 string or empty if not available
+ */
+String fetchChecksumFromGitHub();
 
 /**
  *   Set progress callback
