@@ -10,7 +10,7 @@
 namespace ButtonManager {
 
 // Button timing constants (milliseconds)
-static const uint32_t DEBOUNCE_DELAY_MS = 50;
+static const uint32_t DEBOUNCE_DELAY_MS = 100;
 static const uint32_t SHORT_PRESS_MAX_MS = 1000;
 static const uint32_t LONG_PRESS_MIN_MS = 3000;
 static const uint32_t LONG_PRESS_MAX_MS = 5000;
@@ -71,7 +71,7 @@ bool begin() {
   // Start button monitoring task
   _taskRunning = true;
   BaseType_t result = xTaskCreatePinnedToCore(
-      _buttonTask, "ButtonTask", TASK_STACK_SIZE_SMALL, nullptr,
+      _buttonTask, "ButtonTask", TASK_STACK_SIZE_MEDIUM, nullptr,
       TASK_PRIORITY_HIGH, &_buttonTaskHandle, TASK_CORE_1);
 
   if (result != pdPASS) {
@@ -295,11 +295,6 @@ void performHardReset() {
     LedManager::setState(LedManager::LED_BATTERY, false);
     delay(100);
   }
-
-  //  // ✅ CRITICAL: Erase WiFi credentials from ESP32 NVS
-  // Utils::logMessage("BUTTON", "Erasing WiFi credentials from flash...");
-  // WiFi.disconnect(true, true);  // disconnect(wifioff, eraseap)
-  // delay(100);
   
   // ✅ Also use WifiManager to clear
   Utils::logMessage("BUTTON", "Clearing WiFi via WifiManager...");
@@ -328,17 +323,9 @@ void performHardReset() {
     }
   }
 
-  // ✅ Force erase entire NVS partition (nuclear option)
-  // Utils::logMessage("BUTTON", "Erasing NVS partition...");
-  // nvs_flash_erase();  // Erase entire NVS
-  // nvs_flash_init();   // Reinitialize
-  
-  // Final confirmation blink
-
   Utils::logMessage("BUTTON", "All data erased. Restarting...");
   delay(1000);
-
-  // ESP.restart();
+  ESP.restart();
 }
 
 void setEventCallback(ButtonEventCallback callback) {
@@ -566,12 +553,24 @@ static bool _readButtonDebounced(ButtonId button) {
     _lastRawState[button] = rawState;
   }
 
-  // Only accept new state after debounce delay
+  // ✅ NEW: Require multiple consecutive stable readings
+  static uint8_t stableCount[BTN_COUNT] = {0, 0};
+
   if ((now - _lastDebounceTime[button]) > DEBOUNCE_DELAY_MS) {
-    return rawState;
+    // Check if state has been stable
+    if (rawState == _buttonStates[button].isPressed) {
+      stableCount[button] = 0;
+      return rawState;
+    }
+    
+    // Count consecutive stable readings
+    stableCount[button]++;
+    if (stableCount[button] >= 3) {  // Require 3 stable readings
+      stableCount[button] = 0;
+      return rawState;
+    }
   }
 
-  // Return current known state during debounce period
   return _buttonStates[button].isPressed;
 }
 

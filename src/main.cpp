@@ -27,15 +27,19 @@ static uint64_t lastDataSendTime = 0;
 static uint64_t lastTriggerCheck = 0;
 static uint64_t lastOtaCheck = 0;
 // for sleep mode
+static bool inSleepMode = false;
 static bool sleepEnabled = true;
+static uint64_t sleepStartTime = 0;
+static uint64_t totalSleepDuration = 0;
+static uint64_t sleepElapsed = 0;
 
 // Current metrics
 static EnergySensor::EnergyMetrics currentMetrics;
 
 void handleBootMode(ButtonManager::BootMode mode);
-void handleTriggers();
+// void handleTriggers();
 void sendData();
-void enterLightSleep();
+void enterSmartLightSleep();
 void setupMQTT();
 
 struct __attribute__((packed)) CompactReading {
@@ -293,8 +297,13 @@ void setup() {
   BatteryManager::update();
   EnergySensor::begin();
 
-  // ✅ Register button callback ONCE
+  //Register button callback ONCE
   ButtonManager::setImmediateActionCallback([](ButtonManager::ButtonId button, uint32_t duration) -> bool {
+  //Don't process buttons during sleep mode
+  if (inSleepMode) {
+    return false;  // Ignore all button events during sleep
+  }
+
   if (button == ButtonManager::BTN_WIFI_PAIRING && 
       duration >= 3000 && duration < 5000) {
     Utils::logMessage("MAIN", "⚡ Starting WiFi pairing...");
@@ -580,10 +589,10 @@ void loop() {
 
   OtaManager::loop();
   
-  if (MqttManager::isConnected() && now - lastTriggerCheck >= TRIGGER_CHECK_INTERVAL_MS) {
-    handleTriggers();
-    lastTriggerCheck = now;
-  }
+  // if (MqttManager::isConnected() && now - lastTriggerCheck >= TRIGGER_CHECK_INTERVAL_MS) {
+  //   handleTriggers();
+  //   lastTriggerCheck = now;
+  // }
 
   if (now - lastDataSendTime >= DATA_SEND_INTERVAL_MS) {
     Utils::logMessage("MAIN", "Sensor reading interval reached");
@@ -594,9 +603,9 @@ void loop() {
     sendData();
     lastDataSendTime = now;
 
-    if (MqttManager::isConnected()) {
-      handleTriggers();
-    }
+    // if (MqttManager::isConnected()) {
+    //   handleTriggers();
+    // }
 
     OtaManager::loop();
     delay(100);
@@ -622,7 +631,7 @@ void loop() {
                       mqttInFallbackMode ? 1 : 0);
 
     if (sleepEnabled && !WifiManager::isInPairingMode() && !WifiManager::isPortalActive()) {
-      enterLightSleep();
+        enterSmartLightSleep();
     } else {
       Utils::logMessage("MAIN", "⏭ Skipping sleep (conditions not met)");
     }
@@ -657,52 +666,52 @@ void handleBootMode(ButtonManager::BootMode mode) {
   }
 }
 
-void handleTriggers() {
-  if (!MqttManager::hasPendingTrigger()) {
-    return;
-  }
+// void handleTriggers() {
+//   if (!MqttManager::hasPendingTrigger()) {
+//     return;
+//   }
 
-  String action = MqttManager::getPendingTrigger();
-  Utils::logMessageF("MAIN", "Processing trigger: %s", action.c_str());
+//   String action = MqttManager::getPendingTrigger();
+//   Utils::logMessageF("MAIN", "Processing trigger: %s", action.c_str());
 
-  if (action == "reset") {
-    Utils::logMessage("MAIN", "Trigger: Reset WiFi credentials");
-    WifiManager::resetCredentials();
-  } else if (action == "config") {
-    Utils::logMessage("MAIN", "Trigger: Enter WiFi config mode");
-    WifiManager::startPortal(true);
-  } else if (action == "reboot") {
-    Utils::logMessage("MAIN", "Trigger: Reboot device");
-    Utils::delayTask(500);
-    ESP.restart();
-  } else if (action == "ota") {
-    Utils::logMessage("MAIN", "Trigger: Force OTA check");
-    if (OtaManager::checkForUpdate()) {
-      OtaManager::performUpdate();
-    }
-  }
-  // configurable sleep options added in case in future if we need something
-  // like this
-  else if (action == "sleep_on") {
-    sleepEnabled = true;
-    Utils::logMessage("MAIN", "Sleep enabled");
-  } else if (action == "sleep_off") {
-    sleepEnabled = false;
-    Utils::logMessage("MAIN", "Sleep disabled");
-  }
+//   if (action == "reset") {
+//     Utils::logMessage("MAIN", "Trigger: Reset WiFi credentials");
+//     WifiManager::resetCredentials();
+//   } else if (action == "config") {
+//     Utils::logMessage("MAIN", "Trigger: Enter WiFi config mode");
+//     WifiManager::startPortal(true);
+//   } else if (action == "reboot") {
+//     Utils::logMessage("MAIN", "Trigger: Reboot device");
+//     Utils::delayTask(500);
+//     ESP.restart();
+//   } else if (action == "ota") {
+//     Utils::logMessage("MAIN", "Trigger: Force OTA check");
+//     if (OtaManager::checkForUpdate()) {
+//       OtaManager::performUpdate();
+//     }
+//   }
+//   // configurable sleep options added in case in future if we need something
+//   // like this
+//   else if (action == "sleep_on") {
+//     sleepEnabled = true;
+//     Utils::logMessage("MAIN", "Sleep enabled");
+//   } else if (action == "sleep_off") {
+//     sleepEnabled = false;
+//     Utils::logMessage("MAIN", "Sleep disabled");
+//   }
 
-  MqttManager::clearPendingTrigger();
-}
+//   MqttManager::clearPendingTrigger();
+// }
 
 void sendData() {
-  // ✅ START: Tell OTA we're measuring
+  //START: Tell OTA we're measuring
   OtaManager::setMeasurementActive(true);
 
   if (WifiManager::isFullyConnected() && MqttManager::isConnected()) {
-    // ✅ FIRST: Send any buffered data
+    //FIRST: Send any buffered data
     sendBufferedData();
     
-    // ✅ SECOND: Send current reading
+    //SECOND: Send current reading
     bool success = MqttManager::publishMetrics(currentMetrics);
     if (success) {
       Utils::logMessage("MAIN", "✅ Current data sent via MQTT");
@@ -712,7 +721,7 @@ void sendData() {
     }
     
   } else {
-    // ✅ MQTT not available - buffer the data
+    //MQTT not available - buffer the data
     bufferReading(currentMetrics);
   }
   
@@ -723,107 +732,237 @@ void sendData() {
     statsCounter = 0;
   }
 
-  // ✅ END: Tell OTA measurement is done
+  //Tell OTA measurement is done
   OtaManager::setMeasurementActive(false);
 }
 
-void enterLightSleep() {
+/**
+ * Check if buttons are held for required duration
+ * Returns: 0 = no action, 1 = WiFi pairing, 2 = Hard reset
+ */
+uint8_t checkButtonsWithDuration() {
+  // Initial debounce
+  delay(100);
+  
+  // Sample buttons multiple times to reject noise
+  int resetHighCount = 0;
+  int wifiHighCount = 0;
+  
+  for (int i = 0; i < 10; i++) {
+    if (digitalRead(HARD_RESET_BTN) == HIGH) resetHighCount++;
+    if (digitalRead(WIFI_PAIRING_BTN) == HIGH) wifiHighCount++;
+    delay(10);
+  }
+  
+  // Require 80% of samples to be HIGH to proceed
+  bool resetStable = (resetHighCount >= 8);
+  bool wifiStable = (wifiHighCount >= 8);
+  
+  if (!resetStable && !wifiStable) {
+    Utils::logMessage("SLEEP", "❌ Noise rejected (unstable signal)");
+    return 0;  // Noise - ignore
+  }
+  
+  // Hard Reset Button - requires 5 seconds
+  if (resetStable) {
+    Utils::logMessage("SLEEP", "🔴 Hard Reset detected - verifying 5s hold...");
+    uint32_t holdStart = millis();
+    bool stillHeld = true;
+    
+    // Visual feedback while verifying
+    LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_BLINK_FAST);
+    
+    while (stillHeld && (millis() - holdStart) < 5000) {
+      stillHeld = (digitalRead(HARD_RESET_BTN) == HIGH);
+      delay(50);
+      yield();
+    }
+    
+    LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_OFF);
+    
+    if (stillHeld && (millis() - holdStart) >= 5000) {
+      Utils::logMessage("SLEEP", "✅ Hard Reset VERIFIED (5s hold)");
+      return 2;  // Hard reset confirmed
+    } else {
+      Utils::logMessageF("SLEEP", "❌ Hard Reset rejected (held only %lums)", millis() - holdStart);
+      return 0;  // Released too early
+    }
+  }
+  
+  // WiFi Pairing Button - requires 3 seconds
+  if (wifiStable) {
+    Utils::logMessage("SLEEP", "🔵 WiFi Pairing detected - verifying 3s hold...");
+    uint32_t holdStart = millis();
+    bool stillHeld = true;
+    
+    // Visual feedback while verifying
+    LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_BLINK_FAST);
+    
+    while (stillHeld && (millis() - holdStart) < 3000) {
+      stillHeld = (digitalRead(WIFI_PAIRING_BTN) == HIGH);
+      delay(50);
+      yield();
+    }
+    
+    LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_OFF);
+    
+    if (stillHeld && (millis() - holdStart) >= 3000) {
+      Utils::logMessage("SLEEP", "✅ WiFi Pairing VERIFIED (3s hold)");
+      return 1;  // WiFi pairing confirmed
+    } else {
+      Utils::logMessageF("SLEEP", "❌ WiFi Pairing rejected (held only %lums)", millis() - holdStart);
+      return 0;  // Released too early
+    }
+  }
+  
+  return 0;
+}
 
-  uint32_t sleepDurationSec = WAKEUP_TIME_MS / 1000;
-  Utils::logMessageF("MAIN", "Entering light sleep for %lu seconds...",
-                     sleepDurationSec);
+/**
+ * Enter smart light sleep with periodic button checks
+ * Maintains accurate 15-minute sleep duration even with interruptions
+ */
+void enterSmartLightSleep() {
+  const uint64_t MAIN_SLEEP_MS = WAKEUP_TIME_MS;  // 15 minutes (900000ms)
+  const uint64_t CHECK_INTERVAL_MS = 1000;  // Check buttons every 1 second
+  
+  Utils::logMessageF("MAIN", "💤 Entering smart sleep for %lu seconds...", MAIN_SLEEP_MS / 1000);
 
-  // turn off all led other then power
+  // ✅ Set sleep mode flag to disable button callbacks
+  inSleepMode = true;
+  
+  // Turn off LEDs
   LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_OFF);
   LedManager::setMode(LedManager::LED_CHARGING, LedManager::LED_OFF);
   LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_OFF);
   Utils::delayTask(100);
-
+  
+  // Disconnect MQTT gracefully
   if (MqttManager::isConnected()) {
     MqttManager::disconnect();
     Utils::delayTask(100);
   }
-
-  // ✅ Gracefully disconnect WiFi
+  
+  // Disconnect WiFi gracefully
   if (WifiManager::isFullyConnected()) {
     WiFi.disconnect(false);  // Don't erase credentials
     delay(500);
   }
-
-  // Disable all wake sources first
-  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-
-  uint64_t sleepTimeUs = (uint64_t)WAKEUP_TIME_MS * 1000ULL;
-  esp_sleep_enable_timer_wakeup(sleepTimeUs);
-
-  // wake up on hard reset button and on wifi pairing button
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)HARD_RESET_BTN, 1);
-  uint64_t ext1Mask = (1ULL << WIFI_PAIRING_BTN);
-  esp_sleep_enable_ext1_wakeup(ext1Mask, ESP_EXT1_WAKEUP_ANY_HIGH);
-
-  Serial.flush();
-  uint64_t sleepStart = millis();
-
-  esp_light_sleep_start();
-
-  uint64_t sleepDuration = millis() - sleepStart;
-  esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
-
-  const char *reasonStr = "Unknown";
-  switch (wakeReason) {
-  case ESP_SLEEP_WAKEUP_TIMER:
-    reasonStr = "Timer";
-    break;
-  case ESP_SLEEP_WAKEUP_EXT0:
-    reasonStr = "Hard Reset Button";
-    break;
-  case ESP_SLEEP_WAKEUP_EXT1:
-    reasonStr = "WiFi Button";
-    break;
-  default:
-    break;
+  
+  // Initialize sleep tracking
+  sleepStartTime = millis();
+  totalSleepDuration = MAIN_SLEEP_MS;
+  sleepElapsed = 0;
+  
+  uint32_t checkCount = 0;
+  uint32_t noiseCount = 0;
+  
+  while (sleepElapsed < totalSleepDuration) {
+    // Calculate remaining sleep time
+    uint64_t remaining = totalSleepDuration - sleepElapsed;
+    uint64_t thisSleep = min(CHECK_INTERVAL_MS, remaining);
+    
+    // Disable all wake sources
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    
+    // Enable timer wakeup for this interval
+    esp_sleep_enable_timer_wakeup(thisSleep * 1000ULL);
+    
+    // Enable button wakeup for faster response
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)HARD_RESET_BTN, 1);
+    uint64_t ext1Mask = (1ULL << WIFI_PAIRING_BTN);
+    esp_sleep_enable_ext1_wakeup(ext1Mask, ESP_EXT1_WAKEUP_ANY_HIGH);
+    
+    // Enter light sleep
+    Serial.flush();
+    uint64_t sleepIterationStart = millis();
+    
+    esp_light_sleep_start();
+    
+    // Calculate actual sleep duration
+    uint64_t actualSleepTime = millis() - sleepIterationStart;
+    sleepElapsed += actualSleepTime;
+    
+    // Check wake reason
+    esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
+    checkCount++;
+    
+    // If woken by button, check if it's valid
+    if (wakeReason == ESP_SLEEP_WAKEUP_EXT0 || wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
+      const char* buttonName = (wakeReason == ESP_SLEEP_WAKEUP_EXT0) ? "Hard Reset" : "WiFi Pairing";
+      Utils::logMessageF("SLEEP", "🔔 Woken by %s button (check %lu, elapsed %llums/%llums)", 
+                         buttonName, checkCount, sleepElapsed, totalSleepDuration);
+      
+      uint8_t action = checkButtonsWithDuration();
+      
+      if (action == 2) {
+        // Hard Reset verified
+        Utils::logMessage("SLEEP", "🔴 HARD RESET ACTION - Exiting sleep");
+        Utils::logMessageF("SLEEP", "📊 Sleep statistics: %lu checks, %lu noise events, slept %llums/%llums",
+                          checkCount, noiseCount, sleepElapsed, totalSleepDuration);
+        
+        inSleepMode = false;
+        ButtonManager::performHardReset();
+        return;  // Will restart
+        
+      } else if (action == 1) {
+        // WiFi Pairing verified
+        Utils::logMessage("SLEEP", "🔵 WIFI PAIRING ACTION - Exiting sleep");
+        Utils::logMessageF("SLEEP", "📊 Sleep statistics: %lu checks, %lu noise events, slept %llums/%llums",
+                          checkCount, noiseCount, sleepElapsed, totalSleepDuration);
+        
+        inSleepMode = false;  // ✅ Clear flag before reset
+        WifiManager::startPortal(true);
+        return;  
+        
+      } else {
+        noiseCount++;
+        Utils::logMessageF("SLEEP", "⏰ Resuming sleep (%llu ms remaining)", totalSleepDuration - sleepElapsed);
+      }
+    }
+    // If woken by timer (normal periodic check), just continue
+    
+    yield();
   }
-
-  Utils::logMessageF("MAIN", "Woke up after %lu ms, reason: %s",
-                     (unsigned long)sleepDuration, reasonStr);
-
-  if (wakeReason == ESP_SLEEP_WAKEUP_EXT0) {
-    ButtonManager::performHardReset();
-    return;
-  }
-
-  if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
-  }
-
-  // Reconnect WiFi
-  Utils::logMessage("MAIN", "Reconnecting WiFi...");
+  
+  // Sleep period complete
+  uint64_t actualTotal = millis() - sleepStartTime;
+  
+  Utils::logMessage("SLEEP", "======================================");
+  Utils::logMessageF("SLEEP", "📊 Sleep Summary:");
+  Utils::logMessageF("SLEEP", "   Target:       %llu ms (%lu min)", totalSleepDuration, totalSleepDuration / 60000);
+  Utils::logMessageF("SLEEP", "   Actual:       %llu ms (%lu min)", actualTotal, actualTotal / 60000);
+  Utils::logMessageF("SLEEP", "   Efficiency:   %.1f%%", (sleepElapsed * 100.0) / totalSleepDuration);
+  Utils::logMessageF("SLEEP", "   Checks:       %lu", checkCount);
+  Utils::logMessageF("SLEEP", "   Noise events: %lu", noiseCount);
+  Utils::logMessage("SLEEP", "======================================");
+  
+  // ✅ Clear sleep mode flag
+  inSleepMode = false;
+  
+  // Wake-up procedure
+  Utils::logMessage("MAIN", "🌅 Wake-up sequence starting...");
+  
+  // Normal wake - reconnect everything
+  Utils::logMessage("MAIN", "📡 Phase 1: Reconnecting WiFi...");
   WiFi.mode(WIFI_STA);
   WifiManager::forceReconnect();
-
+  
   uint32_t wifiStart = millis();
   while (!WifiManager::isFullyConnected() && (millis() - wifiStart) < 15000) {
     Utils::delayTask(500);
     yield();
   }
-
-  // ✅ CHECK if WiFi actually reconnected
+  
   if (!WifiManager::isFullyConnected()) {
-    Utils::logMessage("MAIN", "⚠️ WiFi reconnection failed after sleep");
+    Utils::logMessage("MAIN", "⚠️ WiFi reconnection failed");
     BatteryManager::update();
-    return;  // Exit and try again on next wake
-  }
-
-  Utils::logMessage("MAIN", "✅ WiFi reconnected successfully");
-  delay(3000);  // ✅ Give TCP/IP stack time to stabilize
-
-  // Handle portal mode if button was pressed
-  if (WifiManager::isInPairingMode()) {  // ✅ USE FUNCTION INSTEAD
-    Utils::logMessage("MAIN", "Starting portal (button during sleep)");
-    WifiManager::startPortal(true);
     return;
   }
-
-  // ===== PHASE 2: RECONNECT MQTT =====
+  
+  Utils::logMessage("MAIN", "✅ WiFi reconnected");
+  delay(3000);  // TCP/IP stack stabilization
+  
   Utils::logMessage("MAIN", "📡 Phase 2: Reconnecting MQTT...");
   
   uint32_t mqttStart = millis();
@@ -844,13 +983,157 @@ void enterLightSleep() {
     delay(100);
     yield();
   }
-
+  
   if (!MqttManager::isConnected()) {
-    Utils::logMessage("MAIN", "⚠️ MQTT reconnection failed after sleep");
+    Utils::logMessage("MAIN", "⚠️ MQTT reconnection failed");
   } else {
-    Utils::logMessage("MAIN", "✅ MQTT reconnected successfully");
+    Utils::logMessage("MAIN", "✅ MQTT reconnected");
   }
-
+  
   BatteryManager::update();
-  Utils::logMessage("MAIN", "🎉 Wake-up reconnection complete!");
+  Utils::logMessage("MAIN", "🎉 Wake-up complete!");
 }
+
+// void enterLightSleep() {
+
+//   uint32_t sleepDurationSec = WAKEUP_TIME_MS / 1000;
+//   Utils::logMessageF("MAIN", "Entering light sleep for %lu seconds...",
+//                      sleepDurationSec);
+
+//   // turn off all led other then power
+//   LedManager::setMode(LedManager::LED_WIFI, LedManager::LED_OFF);
+//   LedManager::setMode(LedManager::LED_CHARGING, LedManager::LED_OFF);
+//   LedManager::setMode(LedManager::LED_BATTERY, LedManager::LED_OFF);
+//   Utils::delayTask(100);
+
+//   if (MqttManager::isConnected()) {
+//     MqttManager::disconnect();
+//     Utils::delayTask(100);
+//   }
+
+//   // ✅ Gracefully disconnect WiFi
+//   if (WifiManager::isFullyConnected()) {
+//     WiFi.disconnect(false);  // Don't erase credentials
+//     delay(500);
+//   }
+
+//   // Disable all wake sources first
+//   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+
+//   uint64_t sleepTimeUs = (uint64_t)WAKEUP_TIME_MS * 1000ULL;
+//   esp_sleep_enable_timer_wakeup(sleepTimeUs);
+
+//   // wake up on hard reset button and on wifi pairing button
+//   esp_sleep_enable_ext0_wakeup((gpio_num_t)HARD_RESET_BTN, 1);
+//   uint64_t ext1Mask = (1ULL << WIFI_PAIRING_BTN);
+//   esp_sleep_enable_ext1_wakeup(ext1Mask, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+//   Serial.flush();
+//   uint64_t sleepStart = millis();
+
+//   esp_light_sleep_start();
+
+//   uint64_t sleepDuration = millis() - sleepStart;
+//   esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
+
+//   const char *reasonStr = "Unknown";
+//   switch (wakeReason) {
+//   case ESP_SLEEP_WAKEUP_TIMER:
+//     reasonStr = "Timer";
+//     break;
+//   case ESP_SLEEP_WAKEUP_EXT0:
+//     reasonStr = "Hard Reset Button";
+//     break;
+//   case ESP_SLEEP_WAKEUP_EXT1:
+//     reasonStr = "WiFi Button";
+//     break;
+//   default:
+//     break;
+//   }
+
+//   Utils::logMessageF("MAIN", "Woke up after %lu ms, reason: %s",
+//                      (unsigned long)sleepDuration, reasonStr);
+
+// if (wakeReason == ESP_SLEEP_WAKEUP_EXT0) {
+//   Utils::logMessage("MAIN", "Woke by Hard Reset button - verifying hold...");
+  
+//   // ✅ VERIFY the button is STILL held down
+//   if (ButtonManager::waitForLongPress(ButtonManager::BTN_HARD_RESET, 5000)) {
+//     ButtonManager::performHardReset();
+//   } else {
+//     Utils::logMessage("MAIN", "False trigger - button not held");
+//   }
+//   return;
+// }
+
+// if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) {
+//   Utils::logMessage("MAIN", "Woke by WiFi button - verifying hold...");
+  
+//   // ✅ VERIFY the button is STILL held down
+//   if (ButtonManager::waitForLongPress(ButtonManager::BTN_WIFI_PAIRING, 3000)) {
+//     WifiManager::startPortal(true);
+//   } else {
+//     Utils::logMessage("MAIN", "False trigger - button not held");
+//   }
+//   return;
+// }
+
+//   // Reconnect WiFi
+//   Utils::logMessage("MAIN", "Reconnecting WiFi...");
+//   WiFi.mode(WIFI_STA);
+//   WifiManager::forceReconnect();
+
+//   uint32_t wifiStart = millis();
+//   while (!WifiManager::isFullyConnected() && (millis() - wifiStart) < 15000) {
+//     Utils::delayTask(500);
+//     yield();
+//   }
+
+//   // ✅ CHECK if WiFi actually reconnected
+//   if (!WifiManager::isFullyConnected()) {
+//     Utils::logMessage("MAIN", "⚠️ WiFi reconnection failed after sleep");
+//     BatteryManager::update();
+//     return;  // Exit and try again on next wake
+//   }
+
+//   Utils::logMessage("MAIN", "✅ WiFi reconnected successfully");
+//   delay(3000);  // ✅ Give TCP/IP stack time to stabilize
+
+//   // Handle portal mode if button was pressed
+//   if (WifiManager::isInPairingMode()) {  // ✅ USE FUNCTION INSTEAD
+//     Utils::logMessage("MAIN", "Starting portal (button during sleep)");
+//     WifiManager::startPortal(true);
+//     return;
+//   }
+
+//   // ===== PHASE 2: RECONNECT MQTT =====
+//   Utils::logMessage("MAIN", "📡 Phase 2: Reconnecting MQTT...");
+  
+//   uint32_t mqttStart = millis();
+//   const uint32_t MQTT_TIMEOUT = 20000;
+//   const uint32_t RETRY_INTERVAL = 3000;
+//   uint32_t lastAttempt = 0;
+//   int attempts = 0;
+  
+//   while (!MqttManager::isConnected() && (millis() - mqttStart) < MQTT_TIMEOUT) {
+//     if (millis() - lastAttempt >= RETRY_INTERVAL) {
+//       attempts++;
+//       Utils::logMessageF("MAIN", "MQTT attempt %d...", attempts);
+//       MqttManager::reconnect();
+//       lastAttempt = millis();
+//     }
+    
+//     MqttManager::loop();
+//     delay(100);
+//     yield();
+//   }
+
+//   if (!MqttManager::isConnected()) {
+//     Utils::logMessage("MAIN", "⚠️ MQTT reconnection failed after sleep");
+//   } else {
+//     Utils::logMessage("MAIN", "✅ MQTT reconnected successfully");
+//   }
+
+//   BatteryManager::update();
+//   Utils::logMessage("MAIN", "🎉 Wake-up reconnection complete!");
+// }

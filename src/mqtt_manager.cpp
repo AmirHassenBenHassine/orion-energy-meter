@@ -490,7 +490,7 @@ bool saveCredentials(const char *username, const char *password) {
 // FOR FUTURE
 bool loadCredentials(char *username, char *password, size_t maxLen) {
   Preferences prefs;
-  if (!prefs.begin(PREF_NAMESPACE_MQTT, true))
+  if (!prefs.begin(PREF_NAMESPACE_MQTT, false))
     return false;
 
   String storedUser = prefs.getString(PREF_KEY_USER, "");

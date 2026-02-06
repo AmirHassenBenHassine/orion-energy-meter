@@ -457,7 +457,7 @@ void markFirmwareValid() {
 
 bool isPostUpdateBoot() {
   Preferences prefs;
-  prefs.begin(PREF_NAMESPACE_OTA, true);
+  prefs.begin(PREF_NAMESPACE_OTA, false);
   bool postUpdate = prefs.getBool(PREF_KEY_POST_UPDATE, false);
   prefs.end();
   return postUpdate;
@@ -715,7 +715,7 @@ static void _saveEtag(const String &etag) {
 
 static String _loadEtag() {
   Preferences prefs;
-  prefs.begin(PREF_NAMESPACE_OTA, true);
+  prefs.begin(PREF_NAMESPACE_OTA, false);
   String etag = prefs.getString(PREF_KEY_ETAG, "");
   prefs.end();
   return etag;
