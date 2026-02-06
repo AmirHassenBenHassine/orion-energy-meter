@@ -93,8 +93,8 @@ extern String DEVICE_ID;
 #define MQTT_TOPIC_STATUS "orion/status"
 #define MQTT_TOPIC_SCAN "orion/scan"
 #define MQTT_TOPIC_CONFIRM "orion/confirm"
-#define MQTT_TOPIC_WIFI_CREDENTIALS "orion/wifi_credentials"  // ESP32 → OrangePi
-#define MQTT_TOPIC_PAIRING_STATUS "pairing/status"            // Bidirectional
+#define MQTT_TOPIC_WIFI_CREDENTIALS "orion/wifi_credentials"  
+#define MQTT_TOPIC_PAIRING_STATUS "pairing/status"            
 
 // BLE CONFIGURATION
 #define BLE_DEVICE_NAME "ESP32-Orion"
@@ -103,7 +103,7 @@ extern String DEVICE_ID;
 
 // ENERGY SENSOR CALIBRATION
 #define VOLTAGE_CALIBRATION 210.1f //321.17f
-#define CURRENT_CALIBRATION_DEFAULT 7.5f
+#define CURRENT_CALIBRATION_DEFAULT 4.3f
 #define CURRENT_NOISE_THRESHOLD 0.1f
 #define CURRENT_MAX_READING 100.0f
 #define VOLTAGE_NOMINAL_US 120.0f
@@ -123,8 +123,8 @@ extern String DEVICE_ID;
 #define NTP_DAYLIGHT_OFFSET_SEC 3600
 
 // OTA CONFIGURATION
-#define FIRMWARE_URL "https://raw.githubusercontent.com/AmirHassenBenHassine/orion-ota-update/main/finalOrion_transmiter.ino1.bin"
-#define VERSION_JSON_URL "https://raw.githubusercontent.com/AmirHassenBenHassine/orion-ota-update/main/version.json"
+#define FIRMWARE_URL "https://raw.githubusercontent.com/DioneProtocol/orion-firmware/main/firmware.bin"
+#define VERSION_JSON_URL "https://raw.githubusercontent.com/DioneProtocol/orion-firmware/main/version.json"
 
 #define FIRMWARE_VERSION "1.0.0"
 #define OTA_CHECK_INTERVAL_MS 86400000 // Check daily (24 hours)
