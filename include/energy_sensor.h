@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "config.h"
 
 namespace EnergySensor {
 
@@ -10,21 +11,14 @@ namespace EnergySensor {
  *   Three-phase energy metrics structure
  */
 struct EnergyMetrics {
-  // Voltage
-  float voltage;
-
-  // Per-phase readings
-  float current[3];
-  float power[3];
-
-  // Totals
-  float totalPower;
-  float energyTotal; // kWh accumulated
-
-  // Metadata
-  float battery;
-  String timestamp;
   String deviceId;
+  String timestamp;
+  float battery;
+  float voltage;
+  float current[MAX_PHASES];
+  float power[MAX_PHASES];
+  float totalPower;
+  float energyTotal;
 
   /**
    *   Convert metrics to JSON string
@@ -102,6 +96,12 @@ void warmup(int iterations = 5);
  * @param metrics Metrics to print
  */
 void printMetrics(const EnergyMetrics &metrics);
+
+/**
+ * Get device serial number from NVS calibration
+ * @return Serial number string (or "UNCALIBRATED" if not set)
+ */
+String getSerialNumber();
 
 } // namespace EnergySensor
 
