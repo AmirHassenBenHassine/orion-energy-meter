@@ -4,8 +4,11 @@
 #include "utils.h"
 
 #include <EmonLib.h>
+#include <Preferences.h>
 
 namespace EnergySensor {
+
+static Preferences _calibPrefs;
 
 // Add near the top with other static variables
 static bool _ctConnected[MAX_PHASES] = {false, false, false};
@@ -35,6 +38,59 @@ static EnergyMetrics _lastMetrics;
 
 // Initialized flag
 static bool _initialized = false;
+
+// Serial number
+static String _serialNumber = "UNCALIBRATED";
+
+// NVS CALIBRATION FUNCTIONS
+
+/**
+ * Load calibration data from NVS
+ * Returns true if calibration data was found, false if using defaults
+ */
+static bool loadCalibrationFromNVS() {  
+  if (!_calibPrefs.begin("calibration", false)) { // Read-only mode
+    Utils::logMessage("SENSOR", "⚠️  Failed to open NVS calibration - using defaults");
+    return false;
+  }
+  
+  // Check if calibration exists
+  if (!_calibPrefs.isKey("vCal")) {
+    Utils::logMessage("SENSOR", "⚠️  No calibration found in NVS - using defaults");
+    _calibPrefs.end();
+    return false;
+  }
+  
+  // Load voltage calibration
+  _voltageCal = _calibPrefs.getFloat("vCal", VOLTAGE_CALIBRATION);
+  
+  // Load current calibration for each phase
+  _currentCal[0] = _calibPrefs.getFloat("iCal0", CURRENT_CALIBRATION_DEFAULT);
+  _currentCal[1] = _calibPrefs.getFloat("iCal1", CURRENT_CALIBRATION_DEFAULT);
+  _currentCal[2] = _calibPrefs.getFloat("iCal2", CURRENT_CALIBRATION_DEFAULT);
+  
+  // Load serial number
+  _serialNumber = _calibPrefs.getString("serialNum", "UNCALIBRATED");
+  
+  _calibPrefs.end();
+  
+  // Log calibration values
+  Utils::logMessage("SENSOR", "✅ Calibration loaded from NVS:");
+  Utils::logMessageF("SENSOR", "   Serial Number : %s", _serialNumber.c_str());
+  Utils::logMessageF("SENSOR", "   Voltage Cal   : %.3f", _voltageCal);
+  Utils::logMessageF("SENSOR", "   Current R Cal : %.3f", _currentCal[0]);
+  Utils::logMessageF("SENSOR", "   Current Y Cal : %.3f", _currentCal[1]);
+  Utils::logMessageF("SENSOR", "   Current B Cal : %.3f", _currentCal[2]);
+
+  return true;
+}
+
+/**
+ * Get serial number from NVS
+ */
+String getSerialNumber() {
+  return _serialNumber;
+}
 
 // JSON implementation for EnergyMetrics
 String EnergyMetrics::toJson() const {
@@ -132,8 +188,19 @@ bool begin() {
 
   analogReadResolution(12);
 
-  // _emonVoltage.voltage(VOLTAGE_PIN, _voltageCal, 1.7);
+  // *** LOAD CALIBRATION FROM NVS ***
+  bool calibLoaded = loadCalibrationFromNVS();
+  
+  if (!calibLoaded) {
+    Utils::logMessage("SENSOR", "⚠️  WARNING: Using factory default calibration");
+    Utils::logMessage("SENSOR", "⚠️  Accuracy may be reduced (±5-10%)");
+    Utils::logMessage("SENSOR", "⚠️  Device should be calibrated!");
+  }
 
+  // Initialize voltage sensor with loaded/default calibration
+  _emonVoltage.voltage(VOLTAGE_PIN, _voltageCal, 1.7);
+
+  // Initialize current sensors with loaded/default calibration
   for (int i = 0; i < MAX_PHASES; i++) {
     _emonCurrent[i].current(_currentPins[i], _currentCal[i]);
   }
@@ -144,7 +211,7 @@ bool begin() {
   _lastMetrics.deviceId = Utils::generateDeviceId();
   _lastUpdateTime = Utils::millis64();
 
-    // Detect CT sensors on startup
+  // Detect CT sensors on startup
   Utils::logMessage("SENSOR", "Detecting CT sensors...");
   delay(100); // Brief settling time
   
