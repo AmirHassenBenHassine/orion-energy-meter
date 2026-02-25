@@ -1,10 +1,10 @@
 # Orion Energy Monitor
 
-A professional three-phase energy monitoring system built on ESP32 for real-time power consumption tracking and blockchain validation integration.
+A three-phase energy monitoring system built on ESP32 for real-time power generation tracking and blockchain validation integration.
 
 ## Overview
 
-The Orion Energy Monitor is an ESP32-based IoT device that measures voltage and current across three phases, calculates power consumption in real-time, and transmits energy data via MQTT to Orange Pi gateway devices. The system integrates with the Dione Protocol's ORION blockchain validator network for renewable energy validation on the Avalanche blockchain.
+The Orion Energy Monitor is an ESP32-based IoT device that measures voltage and current across three phases, calculates power generation in real-time, and transmits energy data via MQTT to Orange Pi gateway devices. The system integrates with the Dione Protocol's ORION blockchain validator network for renewable energy validation on the Odyssey blockchain.
 
 **Key Capabilities:**
 - Real-time three-phase energy monitoring with ±1% accuracy
@@ -22,7 +22,6 @@ The Orion Energy Monitor is an ESP32-based IoT device that measures voltage and 
 - **ZMPT101B Voltage Sensor** - AC voltage measurement module
 - **3× SCT-013 Current Transformers** - Non-invasive current sensing (30A/100A variants)
 - **Li-ion Battery** (3.7V) with TP4056 charging circuit
-- **TFT LCD Touch Screen** (optional) - Local display and configuration
 
 ### Supporting Components
 - Status LEDs (power, WiFi, charging, battery)
@@ -87,38 +86,6 @@ The Orion Energy Monitor is an ESP32-based IoT device that measures voltage and 
 - ESP32 board support package
 - USB to serial driver (CP2102/CH340)
 
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/orion-monitor.git
-   cd orion-monitor
-   ```
-
-2. **Install dependencies**
-   ```bash
-   pio pkg install
-   ```
-
-3. **Configure settings** (optional)
-   
-   Edit `include/config.h` for custom settings:
-   ```cpp
-   #define DATA_SEND_INTERVAL_MS 30000  // Measurement interval
-   #define MQTT_BROKER_HOST "orion.local"
-   #define MQTT_BROKER_PORT 1883
-   ```
-
-4. **Build and upload**
-   ```bash
-   pio run -e esp32dev -t upload
-   ```
-
-5. **Monitor output**
-   ```bash
-   pio device monitor -b 115200
-   ```
-
 ## Configuration
 
 ### Calibration Values
@@ -141,7 +108,7 @@ The system uses NVS (Non-Volatile Storage) for dynamic calibration. Initial valu
 // MQTT broker settings (mDNS auto-discovery is preferred)
 #define MQTT_BROKER_HOST "orion.local"  // Or IP address
 #define MQTT_BROKER_PORT 1883
-#define MQTT_CLIENT_ID_PREFIX "orion-monitor"
+#define MQTT_CLIENT_ID_PREFIX "OrionEM"
 
 // Data transmission interval
 #define DATA_SEND_INTERVAL_MS 30000  // 30 seconds
@@ -155,57 +122,42 @@ The system uses NVS (Non-Volatile Storage) for dynamic calibration. Initial valu
 |-------|-----|----------|-------------|
 | `energy/metrics` | 1 | No | Real-time energy measurements (JSON) |
 | `orion/status` | 1 | Yes | Device online/offline status |
-| `orion/calibration` | 1 | Yes | Current calibration values |
+| `orion/wifi_credentials` | 1 | Yes | WiFi credentials entered by the User |
+
 
 ### Subscribed Topics
 
 | Topic | Description |
 |-------|-------------|
+| `pairing/status` | Pairing status between Meter and Gateway |
 | `orion/config` | WiFi credential updates from gateway |
 | `orion/trigger` | Remote commands (reset, calibrate, etc.) |
 | `orion/refresh` | Network scan request for WiFi troubleshooting |
-| `orion/ota` | OTA update trigger with version/URL |
 
 ### Energy Metrics Payload
 
 ```json
 {
-  "deviceId": "A1B2C3D4E5F6",
-  "timestamp": "2025-02-25T14:30:00Z",
-  "battery": {
-    "voltage": 3.85,
-    "percentage": 85,
-    "charging": false
-  },
-  "voltage": 230.5,
-  "frequency": 50.0,
-  "totalPower": 1500.0,
-  "totalApparentPower": 1530.0,
-  "powerFactor": 0.98,
-  "energyTotal": 12.547,
-  "phases": [
+   "deviceId": "F8B3B77FEAF4",
+    "timestamp": "2026-02-11 19:35:53",
+    "battery": 82.36668,
+    "voltage": 217.7177,
+    "totalPower": 0,
+    "energyTotal": 0.00092,
+    "phases": [
     {
-      "id": "R",
-      "current": 2.17,
-      "power": 500.1,
-      "apparentPower": 510.2,
-      "powerFactor": 0.98
-    },
-    {
-      "id": "Y",
-      "current": 2.29,
-      "power": 527.7,
-      "apparentPower": 538.9,
-      "powerFactor": 0.98
-    },
-    {
-      "id": "B",
-      "current": 2.05,
-      "power": 472.2,
-      "apparentPower": 481.8,
-      "powerFactor": 0.98
-    }
-  ]
+       "current": 0,
+       "power": 0
+   },
+   {
+      "current": 0,
+       "power": 0
+   },
+   {
+      "current": 0,
+       "power": 0
+   }
+ ]
 }
 ```
 
@@ -214,19 +166,20 @@ The system uses NVS (Non-Volatile Storage) for dynamic calibration. Initial valu
 ### Initial Setup
 
 1. **Enter Provisioning Mode**
+   - If there is no saved networks, the device will automatically enter Provisioning Mode, ELSE
    - Hold the WiFi pairing button during power-on, OR
    - Press hard reset button to factory reset
 
-2. **Connect to Device**
-   - Look for WiFi network: `OrionSetup-XXXXXX`
+3. **Connect to Device**
+   - Look for WiFi network: `OrionSetup`
    - Connect from your phone/laptop (no password required)
 
-3. **Configure Network**
+4. **Configure Network**
    - Captive portal will open automatically
    - Select your WiFi network from the scan list
    - Enter password and save
 
-4. **Automatic Connection**
+5. **Automatic Connection**
    - Device restarts and connects to configured network
    - WiFi LED indicates connection status (solid = connected)
 
@@ -236,50 +189,6 @@ The system uses NVS (Non-Volatile Storage) for dynamic calibration. Initial valu
 - **Slow Blink** (1s): Searching for network
 - **Fast Blink** (200ms): Provisioning mode active
 - **Solid On**: Connected to network and MQTT broker
-
-## MQTT Broker Setup
-
-The device uses **mDNS** for automatic broker discovery. Your MQTT broker should advertise itself on the network.
-
-### Mosquitto on Linux (Ubuntu/Debian)
-
-1. **Install Avahi**
-   ```bash
-   sudo apt-get install avahi-daemon avahi-utils
-   ```
-
-2. **Create service file**
-   ```bash
-   sudo nano /etc/avahi/services/mosquitto.service
-   ```
-
-3. **Add configuration**
-   ```xml
-   <?xml version="1.0" standalone='no'?>
-   <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
-   <service-group>
-     <name>Orion MQTT Broker</name>
-     <service>
-       <type>_mqtt._tcp</type>
-       <port>1883</port>
-       <txt-record>description=Orion Energy Monitor Broker</txt-record>
-     </service>
-   </service-group>
-   ```
-
-4. **Restart Avahi**
-   ```bash
-   sudo systemctl restart avahi-daemon
-   ```
-
-5. **Verify discovery**
-   ```bash
-   avahi-browse -rt _mqtt._tcp
-   ```
-
-### Mosquitto on macOS
-
-mDNS is built-in via Bonjour. Just ensure Mosquitto is configured to listen on port 1883.
 
 ## Calibration Procedures
 
@@ -304,7 +213,6 @@ mDNS is built-in via Bonjour. Just ensure Mosquitto is configured to listen on p
    ```
 
 4. **Update and test**
-   - Send via MQTT to `orion/calibration` topic, OR
    - Update `VOLTAGE_CALIBRATION` in `config.h` and reflash
 
 ### Current Sensor Calibration (SCT-013)
@@ -337,32 +245,10 @@ For precise calibration, use the custom 2.5kW resistor load bank testbench:
 2. Measure current with precision clamp meter
 3. Record device reading via serial/MQTT
 4. Calculate and apply calibration factor
-5. Store in NVS using MQTT command or config file
+5. Store in NVS using dedicated calibration script
 6. Repeat for remaining phases
 
 > **Note**: Each phase can have individual calibration values stored in NVS for maximum accuracy.
-
-## Hardware Production Notes
-
-### Power Delivery Considerations
-
-- **Bulk Capacitance Required**: Add 470µF-1000µF capacitor near ESP32 VIN
-  - Prevents brownout resets during WiFi transmission bursts
-  - Critical for battery-powered operation
-  
-- **Battery Voltage Monitoring**: Use voltage divider (2× 10kΩ recommended)
-  - Ensure ADC reading stays within 0-3.3V range
-  - Add 100nF capacitor across ADC input for noise filtering
-
-### Sensor Installation
-
-- **CT Orientation**: Ensure current transformers are oriented correctly
-  - Arrow or marking should point toward load
-  - Single-phase wire only (do not clamp neutral with live)
-  
-- **ZMPT101B Connections**: 
-  - Connect to L and N terminals (not ground)
-  - Ensure proper isolation from high voltage
 
 ## Project Structure
 
@@ -371,7 +257,7 @@ orion-monitor/
 ├── include/
 │   ├── config.h              # System configuration constants
 │   ├── battery_manager.h     # Battery monitoring & charging
-│   ├── ble_manager.h         # Bluetooth Low Energy (future)
+│   ├── certificates.h         # Bluetooth Low Energy (future)
 │   ├── button_manager.h      # Button debouncing & handling
 │   ├── energy_sensor.h       # Three-phase measurement
 │   ├── led_manager.h         # Status LED control
@@ -382,7 +268,6 @@ orion-monitor/
 ├── src/
 │   ├── main.cpp              # Application entry point
 │   ├── battery_manager.cpp
-│   ├── ble_manager.cpp
 │   ├── button_manager.cpp
 │   ├── energy_sensor.cpp
 │   ├── led_manager.cpp
@@ -391,8 +276,19 @@ orion-monitor/
 │   ├── utils.cpp
 │   └── wifi_manager.cpp
 ├── test/
-│   ├── test_ota.cpp          # OTA update validation
-│   └── test_power.cpp        # Power consumption testing
+│   └───test_embedded/
+│       ├───test_battery
+│       ├───test_button
+│       ├───test_chip
+│       ├───test_energy
+│       ├───test_integration
+│       ├───test_led
+│       ├───test_memory
+│       ├───test_mqtt
+│       ├───test_ota
+│       ├───test_preferences
+│       ├───test_time
+│       └───test_wifi
 ├── platformio.ini            # PlatformIO build configuration
 ├── README.md                 # This file
 └── LICENSE
@@ -409,7 +305,7 @@ All dependencies are automatically managed by PlatformIO:
 | ArduinoJson | ^6.21.3 | JSON serialization/parsing |
 | EmonLib | ^1.1.0 | Energy monitoring calculations |
 | NimBLE-Arduino | ^1.4.1 | Bluetooth Low Energy (optional) |
-| ESPAsyncWebServer | ^1.2.3 | Web interface (future) |
+| Unity | ^2.5.2 | Unit Testing |
 
 ## Troubleshooting
 
@@ -424,14 +320,6 @@ All dependencies are automatically managed by PlatformIO:
 - Check router security (WPA2-PSK supported, WPA3 may need router config)
 - Use hard reset to clear stored credentials and reconfigure
 
-**Problem**: Frequent disconnections
-
-**Solutions**:
-- Check power supply stability (add bulk capacitor if needed)
-- Verify router isn't limiting connections or using aggressive power saving
-- Increase `DATA_SEND_INTERVAL_MS` to reduce network activity
-- Check for interference from other 2.4GHz devices
-
 ### MQTT Connection Issues
 
 **Problem**: Cannot connect to MQTT broker
@@ -442,10 +330,6 @@ All dependencies are automatically managed by PlatformIO:
 - Verify firewall allows port 1883: `sudo ufw allow 1883/tcp`
 - Check mDNS/Avahi is running: `systemctl status avahi-daemon`
 - Review broker logs: `sudo journalctl -u mosquitto -f`
-- Test with mosquitto clients:
-  ```bash
-  mosquitto_sub -h localhost -t '#' -v
-  ```
 
 **Problem**: Messages not being received
 
@@ -527,35 +411,7 @@ All dependencies are automatically managed by PlatformIO:
 - **WiFi Range**: Up to 100m line-of-sight (depends on AP)
 - **Data Buffering**: 7 days in NVS (at 30s intervals)
 - **OTA Update Time**: ~60-90 seconds for typical firmware
-
-## Integration with ORION Blockchain Validator
-
-This energy monitor is part of the larger **ORION** project by Dione Protocol LLC:
-
-- **Gateway Integration**: Transmits data to Orange Pi gateway devices via MQTT
-- **Blockchain Validation**: Energy data is validated and recorded on Avalanche blockchain
-- **Renewable Energy Tracking**: Supports renewable energy credit verification
-- **Distributed Network**: Monitors connect to validator nodes for decentralized validation
-
-For complete system documentation, see the [ORION Project Repository](https://github.com/dione-protocol/orion).
-
-## Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Development Standards
-
-- Follow existing code style and structure
-- Add comments for complex logic
-- Test thoroughly on hardware before submitting
-- Update documentation for new features
-- Include example configurations where applicable
+- 
 
 ## License
 
@@ -567,13 +423,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **ESP32 Community** - Extensive documentation and support
 - **OpenEnergyMonitor** - Inspiration for energy monitoring algorithms
 
-## Support & Contact
-
-- **Issues**: [GitHub Issues](https://github.com/yourusername/orion-monitor/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/orion-monitor/discussions)
-- **Email**: support@dioneprotocol.com
-- **Documentation**: [ORION Wiki](https://github.com/dione-protocol/orion/wiki)
-
 ---
 
-**Built with ❤️ for renewable energy validation and blockchain integration**
