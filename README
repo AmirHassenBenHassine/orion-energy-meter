@@ -1,0 +1,236 @@
+ # Orion Energy Monitor
+
+A three-phase energy monitoring system built on ESP32 for real-time power consumption tracking and reporting.
+
+## Overview
+
+The Orion Energy Monitor measures voltage and current across three phases, calculates power consumption, and transmits data via MQTT. It supports WiFi provisioning through a captive portal, OTA firmware updates, and battery-powered operation with light sleep for power efficiency.
+
+## Hardware Requirements
+
+- ESP32 development board
+- ZMPT101B voltage sensor module
+- 3x SCT-013 current transformer sensors 
+- Li-ion battery with charging circuit 
+- Status LEDs (power, WiFi, charging, battery)
+- Push buttons for WiFi pairing and hard reset
+
+## Pin Configuration
+
+| Function | GPIO |
+|----------|------|
+| Voltage Sensor | 32 |
+| Current Phase R | 39 |
+| Current Phase Y | 34 |
+| Current Phase B | 35 |
+| Battery Voltage | 36 |
+| Power LED | 14 |
+| WiFi LED | 27 |
+| Charging LED | 26 |
+| Battery LED | 25 |
+| WiFi Pairing Button | 4 |
+| Hard Reset Button | 13 |
+| Charging Status | 33 |
+
+## Features
+
+### Energy Monitoring
+- Three-phase voltage and current measurement
+- Real-time power calculation per phase
+- Cumulative energy tracking (kWh)
+- Configurable calibration values
+
+### Connectivity
+- WiFi with captive portal for initial setup
+- MQTT for data transmission
+- mDNS service discovery for broker detection
+- Automatic reconnection handling
+
+### Power Management
+- Light sleep between measurement cycles
+- Battery voltage monitoring
+- Charging status detection
+- LED indicators for system status
+
+### Firmware Updates
+- OTA updates from GitHub releases
+- ETag-based update detection
+- Rollback protection
+
+## Building
+
+### Prerequisites
+
+- PlatformIO CLI or IDE
+- ESP32 board support
+
+### Build Commands
+
+```bash
+# Build firmware
+pio run -e esp32dev
+
+# Upload to device
+pio run -t upload -e esp32dev
+
+# Monitor serial output
+pio device monitor
+```
+
+## Configuration
+
+Edit `include/config.h` to modify:
+
+- `DATA_SEND_INTERVAL_MS` - Interval between measurements (default: 30000ms)
+- `MQTT_BROKER_HOST` - MQTT broker hostname
+- `MQTT_BROKER_PORT` - MQTT broker port (default: 1883)
+- `VOLTAGE_CALIBRATION` - Voltage sensor calibration factor
+- `CURRENT_CALIBRATION_DEFAULT` - Current sensor calibration factor
+
+## MQTT Topics
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `energy/metrics` | Publish | JSON payload with energy data |
+| `orion/status` | Publish | Device connection status |
+| `orion/config` | Subscribe | WiFi credential updates |
+| `orion/trigger` | Subscribe | Remote commands |
+| `orion/refresh` | Subscribe | Network scan requests |
+
+### Metrics Payload Format
+
+```json
+{
+  "deviceId": "XXXXXXXXXXXX",
+  "battery": 85.5,
+  "timestamp": "2025-01-15 14:30:00",
+  "voltage": 230.5,
+  "totalPower": 1500.0,
+  "energyTotal": 12.5,
+  "phases": [
+    {"current": 2.1, "power": 483.0},
+    {"current": 2.3, "power": 529.0},
+    {"current": 2.1, "power": 488.0}
+  ]
+}
+```
+
+## WiFi Provisioning
+
+1. Hold the WiFi pairing button during boot
+2. Connect to the "OrionSetup" access point
+3. Configure WiFi credentials through the captive portal
+4. Device will restart and connect to the configured network
+
+## Hard Reset
+
+Hold the hard reset button during boot to erase all stored credentials and settings. The device will restart in provisioning mode.
+
+## MQTT Broker Setup
+
+The device uses mDNS to discover MQTT brokers. For automatic discovery, configure your broker to advertise via mDNS:
+
+### Mosquitto on Linux
+
+Create `/etc/avahi/services/mosquitto.service`:
+
+```xml
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name>Mosquitto MQTT Broker</name>
+  <service>
+    <type>_mqtt._tcp</type>
+    <port>1883</port>
+  </service>
+</service-group>
+```
+
+Restart Avahi:
+
+```bash
+sudo systemctl restart avahi-daemon
+```
+
+## Calibration
+
+### Voltage Calibration
+
+1. Measure actual mains voltage with a multimeter
+2. Compare with reported voltage
+3. Adjust `VOLTAGE_CALIBRATION` in config.h:
+   ```
+   new_cal = current_cal * (actual_voltage / reported_voltage)
+   ```
+
+### Current Calibration
+
+1. Connect a known load
+2. Measure actual current with a clamp meter
+3. Adjust `CURRENT_CALIBRATION_DEFAULT` similarly
+
+## Project Structure
+
+```
+orion_monitor/
+├── include/
+│   ├── config.h           # Configuration constants
+│   ├── battery_manager.h
+│   ├── ble_manager.h
+│   ├── button_manager.h
+│   ├── energy_sensor.h
+│   ├── led_manager.h
+│   ├── mqtt_manager.h
+│   ├── ota_manager.h
+│   ├── utils.h
+│   └── wifi_manager.h
+├── src/
+│   ├── main.cpp           # Application entry point
+│   ├── battery_manager.cpp
+│   ├── ble_manager.cpp
+│   ├── button_manager.cpp
+│   ├── energy_sensor.cpp
+│   ├── led_manager.cpp
+│   ├── mqtt_manager.cpp
+│   ├── ota_manager.cpp
+│   ├── utils.cpp
+│   └── wifi_manager.cpp
+├── platformio.ini         # Build configuration
+└── README.md
+```
+
+## Dependencies
+
+Managed automatically by PlatformIO:
+
+- WiFiManager
+- PubSubClient
+- ArduinoJson
+- EmonLib
+- NimBLE-Arduino
+
+## Troubleshooting
+
+### Device not connecting to WiFi
+- Verify credentials are correct
+- Check signal strength
+- Try moving closer to the access point
+- Use hard reset to clear stored credentials
+
+### MQTT connection failing
+- Verify broker is running and accessible
+- Check firewall settings
+- Ensure mDNS/Avahi is configured on broker host
+- Check broker logs for connection attempts
+
+### Incorrect readings
+- Verify sensor connections
+- Check calibration values
+- Ensure CT sensors are oriented correctly on the wire
+- Confirm voltage sensor is connected to live and neutral
+
+### High power consumption
+- Reduce `DATA_SEND_INTERVAL_MS` 
+- Check for floating GPIO pins
+
+

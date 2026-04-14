@@ -1,0 +1,166 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#include <Arduino.h>
+
+// DEVICE IDENTIFICATION
+#define DEVICE_NAME "Orion Energy Monitor"
+
+#define COMPANY_NAME "Dione Protocol LLC"
+#define PRODUCT_NAME "Energy Monitor"
+
+// Device ID will be set dynamically from MAC address
+extern String DEVICE_ID;
+
+// PIN DEFINITIONS - SENSORS
+#define MAX_PHASES 3
+#define VOLTAGE_PIN 32
+#define CURRENT_PIN_R 39
+#define CURRENT_PIN_Y 34
+#define CURRENT_PIN_B 35
+
+// PIN DEFINITIONS - LEDs
+#define POWER_LED_PIN 14    // Power status - always on
+#define WIFI_LED_PIN 27     // WiFi status
+#define CHARGING_LED_PIN 26 // Charging status
+#define BATTERY_LED_PIN 25  // Battery status
+
+// PIN DEFINITIONS - BUTTONS
+#define WIFI_PAIRING_BTN 4
+#define HARD_RESET_BTN 13
+
+// PIN DEFINITIONS - BATTERY
+#define CHARGING_STATUS_PIN 33
+#define BATTERY_VOLTAGE_PIN 36
+
+// TIMING CONSTANTS
+#define DATA_SEND_INTERVAL_MS 30000      // 30 seconds
+#define TRIGGER_CHECK_INTERVAL_MS 60000  // 1 minute
+#define WAKEUP_TIME_MS 900000            // 15 minute=900000
+#define OTA_CHECK_INTERVAL_MS 86400000   // 24 hours
+
+// LED TIMING
+#define LED_BLINK_FAST_MS 200
+#define LED_BLINK_SLOW_MS 500
+#define LED_BLINK_AP_MS 1000
+
+// WIFI CONFIGURATION
+#define WIFI_CONFIG_PORTAL_SSID "OrionSetup"
+#define WIFI_CONFIG_PORTAL_PASSWORD "Orion2025"
+#define WIFI_CONNECT_TIMEOUT_SECONDS 20
+#define WIFI_PORTAL_TIMEOUT_SECONDS 900
+#define WIFI_CONNECT_TIMEOUT_MS 30000
+#define WIFI_MAX_RECONNECT_ATTEMPTS 10
+#define WIFI_RECONNECT_DELAY_MS 5000
+#define WIFI_STABLE_CONNECTION_MS 120000
+#define WIFI_LWIP_STABILIZATION_MS 2000
+
+// MQTT CONFIGURATION
+#define MQTT_BROKER_HOST "orion.local"
+// xxxxxxxxxxxxxx IN FUTURE TO BE UPDATE TO SECURE PORT ONCE VPS BROKER IS SETUP
+// xxxxxxxxxxxxxx
+#define MQTT_BROKER_PORT 1883
+#define MQTT_BROKER_PORT_INSECURE 1883
+
+// Security
+// // xxxxxxxxxxxxxx IN FUTURE TO BE UPDATE TO SECURE CONNECTION ONCE VPS BROKER
+// IS SETUP xxxxxxxxxxxxxx
+#define MQTT_USE_TLS false
+#define MQTT_VERIFY_CERTIFICATE false
+
+// Authentication
+// // xxxxxxxxxxxxxx IN FUTURE TO BE UPDATE TO SECURE CONNECTION ONCE VPS BROKER
+// IS SETUP xxxxxxxxxxxxxx
+#define MQTT_DEFAULT_USERNAME "orion_device"
+#define MQTT_DEFAULT_PASSWORD "123456789"
+
+// Client settings
+#define MQTT_CLIENT_ID_PREFIX "OrionEM"
+#define MQTT_BUFFER_SIZE 2048
+#define MQTT_KEEPALIVE_SEC 60
+#define MQTT_RECONNECT_DELAY_MS 5000
+#define MQTT_MAX_RECONNECT_ATTEMPTS 10
+
+// QoS
+#define MQTT_QOS_DEFAULT 1
+#define MQTT_QOS_METRICS 1
+
+// Topics
+#define MQTT_TOPIC_ENERGY_METRICS "energy/metrics"
+#define MQTT_TOPIC_TRIGGER "orion/trigger"
+#define MQTT_TOPIC_REFRESH "orion/refresh"
+#define MQTT_TOPIC_CONFIG "orion/config"
+#define MQTT_TOPIC_STATUS "orion/status"
+#define MQTT_TOPIC_SCAN "orion/scan"
+#define MQTT_TOPIC_CONFIRM "orion/confirm"
+#define MQTT_TOPIC_WIFI_CREDENTIALS "orion/wifi_credentials"  
+#define MQTT_TOPIC_PAIRING_STATUS "pairing/status"            
+
+// BLE CONFIGURATION
+#define BLE_DEVICE_NAME "ESP32-Orion"
+#define BLE_SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define BLE_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// ENERGY SENSOR CALIBRATION
+#define VOLTAGE_CALIBRATION 210.1f //321.17f
+#define CURRENT_CALIBRATION_DEFAULT 4.3f
+#define CURRENT_NOISE_THRESHOLD 0.1f
+#define CURRENT_MAX_READING 100.0f
+#define VOLTAGE_NOMINAL_US 120.0f
+#define VOLTAGE_NOMINAL_EU 230.0f
+
+// BATTERY CONFIGURATION
+#define BATTERY_SAMPLES 20
+#define BATTERY_VOLTAGE_DIVIDER_RATIO 2.0f
+#define BATTERY_MAX_VOLTAGE 4.2f
+#define BATTERY_MIN_VOLTAGE 3.0f
+#define BATTERY_LOW_THRESHOLD 20.0f
+#define BATTERY_CRITICAL_THRESHOLD 10.0f
+
+// NTP CONFIGURATION
+#define NTP_SERVER "pool.ntp.org"
+#define NTP_GMT_OFFSET_SEC 3600
+#define NTP_DAYLIGHT_OFFSET_SEC 3600
+
+// OTA CONFIGURATION
+#define FIRMWARE_URL "https://raw.githubusercontent.com/DioneProtocol/orion-firmware/main/firmware.bin"
+#define VERSION_JSON_URL "https://raw.githubusercontent.com/DioneProtocol/orion-firmware/main/version.json"
+
+#define FIRMWARE_VERSION "1.0.0"
+#define OTA_CHECK_INTERVAL_MS 86400000 // Check daily (24 hours)
+
+// FREERTOS TASK CONFIGURATION
+#define TASK_STACK_SIZE_SMALL 2048
+#define TASK_STACK_SIZE_MEDIUM 4096
+#define TASK_STACK_SIZE_LARGE 8192
+
+#define TASK_PRIORITY_LOW 1
+#define TASK_PRIORITY_MEDIUM 2
+#define TASK_PRIORITY_HIGH 3
+
+#define TASK_CORE_0 0
+#define TASK_CORE_1 1
+
+// Task names
+#define TASK_NAME_WIFI "WiFiTask"
+#define TASK_NAME_MQTT "MQTTTask"
+#define TASK_NAME_SENSOR "SensorTask"
+#define TASK_NAME_LED_POWER "PowerLED"
+#define TASK_NAME_LED_WIFI "WiFiLED"
+#define TASK_NAME_LED_CHARGING "ChargingLED"
+#define TASK_NAME_LED_BATTERY "BatteryLED"
+
+// MDNS CONFIGURATION
+#define MDNS_HOSTNAME "OrionEM"
+
+// CONNECTIVITY TEST
+#define CONNECTIVITY_TEST_HOST "google.com"
+#define CONNECTIVITY_TEST_PORT 80
+#define CONNECTIVITY_TEST_TIMEOUT_MS 5000
+
+// PREFERENCES NAMESPACES
+#define PREF_NAMESPACE_WIFI "wifiCreds"
+#define PREF_NAMESPACE_OTA "ota"
+#define PREF_NAMESPACE_DEVICE "device"
+#define PREF_NAMESPACE_MQTT "mqtt"
+#endif // CONFIG_H
