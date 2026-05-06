@@ -126,7 +126,7 @@ extern String DEVICE_ID;
 #define FIRMWARE_URL "https://raw.githubusercontent.com/DioneProtocol/orion-firmware/main/firmware.bin"
 #define VERSION_JSON_URL "https://raw.githubusercontent.com/DioneProtocol/orion-firmware/main/version.json"
 
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.1.0"
 #define OTA_CHECK_INTERVAL_MS 86400000 // Check daily (24 hours)
 
 // FREERTOS TASK CONFIGURATION
