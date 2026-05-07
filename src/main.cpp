@@ -86,11 +86,10 @@ CompactReading metricsToCompact(const EnergySensor::EnergyMetrics& metrics) {
 
 // Convert compact back to JSON for MQTT
 String compactToJson(const CompactReading& compact) {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<768> doc;
   
   doc["deviceId"] = DEVICE_ID;
   
-  // Convert Unix timestamp back to formatted string
   time_t rawtime = compact.timestampUnix;
   struct tm* timeinfo = localtime(&rawtime);
   char timeStr[32];
@@ -102,8 +101,18 @@ String compactToJson(const CompactReading& compact) {
   doc["totalPower"] = compact.totalPower;
   doc["energyTotal"] = compact.energyTotal;
   
-  JsonArray phases = doc.createNestedArray("phases");
+  // Determine connected phases from data
+  // If power is exactly 0 and current is exactly 0, phase is disconnected
+  JsonArray connected = doc.createNestedArray("connectedPhases");
+  int phaseCount = 0;
+  for (int i = 0; i < 3; i++) {
+    bool conn = (compact.current[i] > 0.0f || compact.power[i] > 0.0f);
+    connected.add(conn);
+    if (conn) phaseCount++;
+  }
+  doc["phaseCount"] = phaseCount;
   
+  JsonArray phases = doc.createNestedArray("phases");
   for (int i = 0; i < 3; i++) {
     JsonObject phase = phases.createNestedObject();
     phase["current"] = compact.current[i];

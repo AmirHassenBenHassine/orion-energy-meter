@@ -13,7 +13,7 @@ static Preferences _calibPrefs;
 // Add near the top with other static variables
 static bool _ctConnected[MAX_PHASES] = {false, false, false};
 static uint32_t _lastCtCheck[MAX_PHASES] = {0, 0, 0};
-static const uint32_t CT_CHECK_INTERVAL = 5000; // Check every 5 seconds
+static const uint32_t CT_CHECK_INTERVAL = 8000; // Check every 5 seconds
 
 // EmonLib instances
 static EnergyMonitor _emonCurrent[MAX_PHASES];
@@ -94,7 +94,7 @@ String getSerialNumber() {
 
 // JSON implementation for EnergyMetrics
 String EnergyMetrics::toJson() const {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<768> doc;
 
   doc["deviceId"] = deviceId;
   doc["timestamp"] = timestamp;
@@ -103,11 +103,28 @@ String EnergyMetrics::toJson() const {
   doc["totalPower"] = totalPower;
   doc["energyTotal"] = energyTotal;
 
+  // Connected phases array — gateway uses this as source of truth
+  JsonArray connected = doc.createNestedArray("connectedPhases");
+  int phaseCount = 0;
+  for (int i = 0; i < MAX_PHASES; i++) {
+    bool conn = isPhaseConnected(i);
+    connected.add(conn);
+    if (conn) phaseCount++;
+  }
+  doc["phaseCount"] = phaseCount;
+
+  // Only include connected phases in the array
   JsonArray phases = doc.createNestedArray("phases");
   for (int i = 0; i < MAX_PHASES; i++) {
     JsonObject phase = phases.createNestedObject();
-    phase["current"] = current[i];
-    phase["power"] = power[i];
+    if (isPhaseConnected(i)) {
+      phase["current"] = current[i];
+      phase["power"] = power[i];
+    } else {
+      // Explicitly zero — belt and suspenders
+      phase["current"] = 0;
+      phase["power"] = 0;
+    }
   }
 
   String output;
@@ -144,41 +161,51 @@ static bool isCtConnected(int phase) {
   
   int pin = _currentPins[phase];
   
-  // Take quick samples
-  const int samples = 50;
-  int readings[samples];
+  // Multi-pass sampling for reliability
+  const int passes = 3;
+  int passResults = 0;
   
-  for (int i = 0; i < samples; i++) {
-    readings[i] = analogRead(pin);
-    delayMicroseconds(100);
+  for (int pass = 0; pass < passes; pass++) {
+    const int samples = 100;  // Doubled from 50
+    int readings[samples];
+    long sum = 0;
+    
+    for (int i = 0; i < samples; i++) {
+      readings[i] = analogRead(pin);
+      sum += readings[i];
+      delayMicroseconds(200);  // Full AC cycle coverage at 50Hz
+    }
+    
+    // Calculate range (max - min)
+    int minVal = 4095;
+    int maxVal = 0;
+    for (int i = 0; i < samples; i++) {
+      if (readings[i] < minVal) minVal = readings[i];
+      if (readings[i] > maxVal) maxVal = readings[i];
+    }
+    
+    int range = maxVal - minVal;
+    float mean = (float)sum / samples;
+    
+    // Calculate standard deviation
+    float sumSqDiff = 0;
+    for (int i = 0; i < samples; i++) {
+      float diff = readings[i] - mean;
+      sumSqDiff += diff * diff;
+    }
+    float stdDev = sqrt(sumSqDiff / samples);
+    
+    // Connected CT: range < 1200, stdDev < 400, mean near midpoint (1800-2200)
+    // Floating pin: range > 1200 OR stdDev > 500 OR mean far from midpoint
+    bool connected = (range < 1200) && (stdDev < 400.0f) && (mean > 1400.0f && mean < 2600.0f);
+    
+    if (connected) passResults++;
+    
+    delay(10);  // Gap between passes
   }
   
-  // Calculate range (max - min)
-  int minVal = 4095;
-  int maxVal = 0;
-  
-  for (int i = 0; i < samples; i++) {
-    if (readings[i] < minVal) minVal = readings[i];
-    if (readings[i] > maxVal) maxVal = readings[i];
-  }
-  
-  int range = maxVal - minVal;
-  
-  // Debug output
-  // Utils::logMessageF("SENSOR", "Phase %d: range=%d, min=%d, max=%d", 
-  //                    phase + 1, range, minVal, maxVal);
-  
-  // Floating pins have huge range (your data shows 0-3445)
-  // Connected CTs should have smaller, consistent range around 1800-1900
-  const int MAX_ACCEPTABLE_RANGE = 1200;
-  
-  if (range > MAX_ACCEPTABLE_RANGE) {
-    // Utils::logMessageF("SENSOR", "Phase %d: DISCONNECTED (range too high)", phase + 1);
-    return false; // Disconnected/floating
-  }
-  
-  // Utils::logMessageF("SENSOR", "Phase %d: CONNECTED", phase + 1);
-  return true;
+  // Majority vote: 2 out of 3 passes must agree
+  return (passResults >= 2);
 }
 
 bool begin() {
