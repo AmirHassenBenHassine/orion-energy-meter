@@ -138,8 +138,10 @@ bool begin(const MqttBrokerConfig &brokerConfig) {
   }
 
   // ✅ Log what credentials we're using (masked password)
-  if (strlen(_username) < 0) {
+  if (strlen(_username) == 0 || strlen(_password) == 0) {
     Utils::logMessage("MQTT", "WARNING: No credentials configured!");
+  } else {
+    Utils::logMessageF("MQTT", "Using credentials: user=%s pass=***", _username);
   }
 
   // Create client
